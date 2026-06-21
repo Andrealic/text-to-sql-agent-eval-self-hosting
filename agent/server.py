@@ -55,9 +55,12 @@ def health() -> dict[str, str]:
 @app.post("/answer", response_model=AnswerResponse)
 def answer(req: AnswerRequest) -> AnswerResponse:
     state = AgentState(question=req.question, db_id=req.db)
+    DEFAULT_TAGS = {
+        "agent_version": "v0.1.0"
+    }
     config: dict[str, Any] = {
         "callbacks": [_lf_handler] if _lf_handler is not None else [],
-        "metadata": req.tags,
+        "metadata": {**DEFAULT_TAGS, **req.tags},
     }
     try:
         final = graph.invoke(state, config=config)
