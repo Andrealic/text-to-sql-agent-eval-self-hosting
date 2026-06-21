@@ -23,7 +23,7 @@ Question: {question}
 """
 
 VERIFY_SYSTEM = """You verify whether SQL results answer the user's question.
-Reply with ONLY JSON: {"ok": true/false, "issue": "short explanation if not ok or error message, otherwise "none"}
+Reply with ONLY JSON: {"ok": true/false (boolean), "issue": "short explanation if not ok or error message, otherwise "none" (string)}
 Mark ok=false if: SQL error, 0 rows when the question expects for sure data, wrong columns, clearly wrong answer, unexpected nulls, ."""
 
 VERIFY_USER = """Question: {question}
