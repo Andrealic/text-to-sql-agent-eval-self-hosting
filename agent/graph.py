@@ -33,7 +33,7 @@ from pydantic import BaseModel, ValidationError
 
 # Total generate + revise calls before the loop is forced to stop.
 # 3-5 is a reasonable range; tune it as part of Phase 3.
-MAX_ITERATIONS = 1
+MAX_ITERATIONS = 3
 
 #VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 #VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
@@ -44,7 +44,7 @@ VLLM_MODEL = os.environ.get("VLLM_MODEL", "cohere/north-mini-code:free")
 LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
 
 class VerifyResult(BaseModel):
-    ok: str = ""
+    ok: bool = False
     issue: str = ""
 
 @dataclass
@@ -186,10 +186,10 @@ def revise_node(state: AgentState) -> dict:
     ])
     revise_result = _extract_sql(response.content)
     return {
-        "revise_result": revise_result,
-        "history": state.history + [{"node": "revise", "revise_result": revise_result}],
-        
-    }
+    "sql": revise_result,
+    "iteration": state.iteration + 1,
+    "history": state.history + [{"node": "revise", "sql": revise_result}],
+}
 
 
 def route_after_verify(state: AgentState) -> str:
@@ -198,7 +198,7 @@ def route_after_verify(state: AgentState) -> str:
     Two reasons to end: the verifier was happy (state.verify_ok), or you've hit
     the iteration cap (state.iteration >= MAX_ITERATIONS). Otherwise, revise.
     """
-    if state.verify_ok == "true" or state.verify_ok == True or state.verify_ok == "1":
+    if state.verify_ok:
         return "end"
     elif state.iteration >= MAX_ITERATIONS:
         return "end"
