@@ -17,6 +17,8 @@ data/bird/
 results/*.json
 screenshots/*.png
 screenshots/*.jpg
+load_test/perf_pool.jsonl
+evals/eval_set.jsonl
 
 # HF cache (if anyone runs locally)
 .cache/
