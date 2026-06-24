@@ -56,9 +56,84 @@ def matches(gold_rows: list[tuple] | None, pred_rows: list[tuple] | None) -> boo
 
 # ---------- Implement these (Phase 5) ----------------------------------
 
+def _attempts_from_history(history: list[dict], fallback_sql: str) -> list[dict]:
+    """Rebuild SQL attempts (generate_sql / revise) with verify_ok attached."""
+    attempts: list[dict] = []
+    for entry in history:
+        node = entry.get("node")
+        if node in ("generate_sql", "revise"):
+            attempts.append({
+                "node": node,
+                "sql": entry.get("sql", ""),
+                "verify_ok": None,
+            })
+        elif node == "verify" and attempts:
+            attempts[-1]["verify_ok"] = entry.get("verify_ok")
+
+    if not attempts and fallback_sql:
+        attempts.append({"node": "generate_sql", "sql": fallback_sql, "verify_ok": None})
+    return attempts
+
+
 def eval_one(question: dict, agent_url: str) -> dict:
     """Score one question. Return a dict capturing per-iteration correctness."""
-    raise NotImplementedError("Phase 5")
+    db_id = question["db_id"]
+    gold_ok, gold_rows, gold_err = run_sql(db_id, question["gold_sql"])
+
+    base = {
+        "question": question["question"],
+        "db_id": db_id,
+        "gold_sql": question["gold_sql"],
+        "gold_exec_ok": gold_ok,
+        "gold_error": gold_err,
+    }
+
+    try:
+        resp = httpx.post(
+            agent_url,
+            json={"question": question["question"], "db": db_id},
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        return {
+            **base,
+            "transport_error": f"{type(e).__name__}: {e}",
+            "final_sql": "",
+            "iterations": 0,
+            "agent_ok": False,
+            "agent_error": None,
+            "final_correct": False,
+            "per_iteration": [],
+        }
+
+    attempts = _attempts_from_history(data.get("history") or [], data.get("sql", ""))
+    per_iteration: list[dict] = []
+    for i, attempt in enumerate(attempts):
+        pred_ok, pred_rows, pred_err = run_sql(db_id, attempt["sql"])
+        correct = gold_ok and pred_ok and matches(gold_rows, pred_rows)
+        per_iteration.append({
+            "iteration": i,
+            "node": attempt["node"],
+            "sql": attempt["sql"],
+            "correct": correct,
+            "verify_ok": attempt["verify_ok"],
+            "exec_ok": pred_ok,
+            "error": pred_err,
+        })
+
+    final_correct = per_iteration[-1]["correct"] if per_iteration else False
+
+    return {
+        **base,
+        "final_sql": data.get("sql", ""),
+        "iterations": data.get("iterations", len(per_iteration)),
+        "agent_ok": data.get("ok", False),
+        "agent_error": data.get("error"),
+        "final_correct": final_correct,
+        "per_iteration": per_iteration,
+    }
 
 
 def summarize(results: list[dict]) -> dict:
@@ -70,7 +145,43 @@ def summarize(results: list[dict]) -> dict:
     The agent stopped emitting; whatever it had at termination is what
     would have been served had we polled at iteration k.
     """
-    raise NotImplementedError("Phase 5")
+    n = len(results)
+    if n == 0:
+        return {
+            "n": 0,
+            "overall_pass_rate": 0.0,
+            "per_iteration_pass_rate": [],
+            "avg_iterations": 0.0,
+            "n_agent_errors": 0,
+            "n_transport_errors": 0,
+            "n_gold_errors": 0,
+        }
+
+    max_iters = max(len(r["per_iteration"]) for r in results)
+    per_iteration_pass_rate: list[float] = []
+
+    for k in range(max_iters):
+        correct_at_k = 0
+        for r in results:
+            per_iter = r["per_iteration"]
+            if k < len(per_iter):
+                correct_at_k += int(per_iter[k]["correct"])
+            elif per_iter:
+                correct_at_k += int(per_iter[-1]["correct"])
+        per_iteration_pass_rate.append(correct_at_k / n)
+
+    overall_pass_rate = sum(int(r["final_correct"]) for r in results) / n
+    avg_iterations = sum(r.get("iterations", 0) for r in results) / n
+
+    return {
+        "n": n,
+        "overall_pass_rate": overall_pass_rate,
+        "per_iteration_pass_rate": per_iteration_pass_rate,
+        "avg_iterations": avg_iterations,
+        "n_agent_errors": sum(1 for r in results if not r.get("agent_ok", True)),
+        "n_transport_errors": sum(1 for r in results if r.get("transport_error")),
+        "n_gold_errors": sum(1 for r in results if not r.get("gold_exec_ok", True)),
+    }
 
 
 # ---------- Main (provided) --------------------------------------------
