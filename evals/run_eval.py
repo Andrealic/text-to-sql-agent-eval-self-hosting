@@ -13,6 +13,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sqlite3
 import time
@@ -75,10 +76,10 @@ def _attempts_from_history(history: list[dict], fallback_sql: str) -> list[dict]
     return attempts
 
 
-def eval_one(question: dict, agent_url: str) -> dict:
+async def eval_one(question: dict, client: httpx.AsyncClient, agent_url: str) -> dict:
     """Score one question. Return a dict capturing per-iteration correctness."""
     db_id = question["db_id"]
-    gold_ok, gold_rows, gold_err = run_sql(db_id, question["gold_sql"])
+    gold_ok, gold_rows, gold_err = await asyncio.to_thread(run_sql, db_id, question["gold_sql"])
 
     base = {
         "question": question["question"],
@@ -89,7 +90,7 @@ def eval_one(question: dict, agent_url: str) -> dict:
     }
 
     try:
-        resp = httpx.post(
+        resp = await client.post(
             agent_url,
             json={"question": question["question"], "db": db_id},
             timeout=120.0,
@@ -111,7 +112,7 @@ def eval_one(question: dict, agent_url: str) -> dict:
     attempts = _attempts_from_history(data.get("history") or [], data.get("sql", ""))
     per_iteration: list[dict] = []
     for i, attempt in enumerate(attempts):
-        pred_ok, pred_rows, pred_err = run_sql(db_id, attempt["sql"])
+        pred_ok, pred_rows, pred_err = await asyncio.to_thread(run_sql, db_id, attempt["sql"])
         correct = gold_ok and pred_ok and matches(gold_rows, pred_rows)
         per_iteration.append({
             "iteration": i,
@@ -186,21 +187,36 @@ def summarize(results: list[dict]) -> dict:
 
 # ---------- Main (provided) --------------------------------------------
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval-set", type=Path, default=DEFAULT_EVAL_FILE)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT_FILE)
     parser.add_argument("--agent-url", default=AGENT_URL_DEFAULT)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=5,
+        help="Max agent requests in flight at once (keep low to avoid rate limits / SLO distortion).",
+    )
     args = parser.parse_args()
 
     questions = [json.loads(line) for line in args.eval_set.read_text().splitlines() if line.strip()]
     print(f"Loaded {len(questions)} eval questions from {args.eval_set}")
 
-    results: list[dict] = []
+    sem = asyncio.Semaphore(args.concurrency)
+    done = 0
+
+    async def worker(q: dict, client: httpx.AsyncClient) -> dict:
+        nonlocal done
+        async with sem:
+            result = await eval_one(q, client, args.agent_url)
+        done += 1
+        print(f"[{done}/{len(questions)}] {q['db_id']}: {q['question'][:60]}...", flush=True)
+        return result
+
     t0 = time.monotonic()
-    for i, q in enumerate(questions, 1):
-        print(f"[{i}/{len(questions)}] {q['db_id']}: {q['question'][:60]}...", flush=True)
-        results.append(eval_one(q, args.agent_url))
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*(worker(q, client) for q in questions))
     elapsed = time.monotonic() - t0
 
     summary = summarize(results)
@@ -216,4 +232,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
