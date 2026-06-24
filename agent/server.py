@@ -24,9 +24,11 @@ from agent.graph import AgentState, graph  # noqa: E402
 # produce zero traces.
 _lf_handler: Any = None
 if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY"):
-    from langfuse.langchain import CallbackHandler
+    from langfuse import get_client
 
-    _lf_handler = CallbackHandler()
+    from agent.langfuse_callbacks import OpenRouterCostCallbackHandler
+
+    _lf_handler = OpenRouterCostCallbackHandler()
 
 
 app = FastAPI()
@@ -66,6 +68,9 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         final = graph.invoke(state, config=config)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+    finally:
+        if _lf_handler is not None:
+            get_client().flush()
 
     sql = final.get("sql", "")
     iteration = final.get("iteration", 0)
