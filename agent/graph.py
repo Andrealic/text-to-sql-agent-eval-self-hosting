@@ -58,7 +58,6 @@ class AgentState:
     execution: ExecutionResult | None = None
     verify_ok: bool = False
     verify_issue: str = ""
-    exploration_queries: list[str] = field(default_factory=list)
     findings: dict[str, str] = field(default_factory=dict)
     revise_result: str = ""
     iteration: int = 0
@@ -142,12 +141,11 @@ def explore_node(state: AgentState) -> dict:
             question=state.question,
         )),
     ])
-    exploration_queries = extract_statements(response.content)[:MAX_EXPLORE_QUERIES]
-    findings = {q: _render_rows(execute_sql(state.db_id, q)) for q in exploration_queries}
+    queries = extract_statements(response.content)[:MAX_EXPLORE_QUERIES]
+    findings = {q: _render_rows(execute_sql(state.db_id, q)) for q in queries}
     return {
-        "exploration_queries": exploration_queries,
         "findings": findings,
-        "history": state.history + [{"node": "explore", "exploration_queries": exploration_queries, "findings": findings}],
+        "history": state.history + [{"node": "explore", "findings": findings}],
     }
 
 def generate_sql_node(state: AgentState) -> dict:
@@ -164,7 +162,6 @@ def generate_sql_node(state: AgentState) -> dict:
         ("system", prompts.GENERATE_SQL_SYSTEM),
         ("user", prompts.GENERATE_SQL_USER.format(
             schema=state.schema,
-            exploration_queries="\n".join(state.exploration_queries),
             findings=_findings_text(state.findings),
             question=state.question,
         )),
@@ -200,7 +197,6 @@ def verify_node(state: AgentState) -> dict:
         ("user", prompts.VERIFY_USER.format(
             schema=state.schema,
             question=state.question,
-            exploration_queries="\n".join(state.exploration_queries),
             findings=_findings_text(state.findings),
             sql=state.sql,
             execution=state.execution.render(),
@@ -235,7 +231,6 @@ def revise_node(state: AgentState) -> dict:
             execution=state.execution.render(),
             verify_ok=state.verify_ok,
             verify_issue=state.verify_issue,
-            exploration_queries="\n".join(state.exploration_queries),
             findings=_findings_text(state.findings),
         )),
     ])

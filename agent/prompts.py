@@ -21,10 +21,7 @@ Rules:
 GENERATE_SQL_USER = """Schema:
 {schema}
 
-Exploration queries:
-{exploration_queries}
-
-Data exploration (real values and formats from the database):
+Data exploration (each block is an exploration query and its real result):
 {findings}
 
 Question: {question}
@@ -41,10 +38,7 @@ SQL executed:
 Execution result:
 {execution}
 
-Exploration queries:
-{exploration_queries}
-
-Data exploration (real values and formats from the database):
+Data exploration (each block is an exploration query and its real result):
 {findings}
 """
 
@@ -77,9 +71,7 @@ Verifier ok:
 {verify_ok}
 Verifier issue:
 {verify_issue}
-Information gathered from the database (use the real values/formats shown here):
+Information gathered from the database (each block is an exploration query and its real result; use the real values/formats shown here):
 {findings}
-Exploration queries:
-{exploration_queries}
 
 Write a corrected SELECT."""

@@ -79,16 +79,19 @@ def test_explore_surfaces_real_element_and_label_values():
 
 
 def test_explore_findings_keyed_by_query():
-    """findings is a {query: result} dict, paired with exploration_queries."""
+    """findings is a {query: result} dict keyed by the exploration queries."""
     out = _run_explore_with_reply("SELECT DISTINCT element FROM atom; SELECT label FROM molecule")
-    assert set(out["findings"].keys()) == set(out["exploration_queries"])
+    assert set(out["findings"].keys()) == {
+        "SELECT DISTINCT element FROM atom",
+        "SELECT label FROM molecule",
+    }
 
 
 def test_explore_records_history_and_bounds_queries():
     out = _run_explore_with_reply("SELECT DISTINCT element FROM atom; SELECT 1; SELECT 2")
     entry = out["history"][-1]
     assert entry["node"] == "explore"
-    assert len(entry["exploration_queries"]) == 3
+    assert len(entry["findings"]) == 3
 
 
 def test_explore_handles_no_queries():
