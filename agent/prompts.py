@@ -34,8 +34,9 @@ VERIFY_SYSTEM = """You are a strict SQLite result verifier: decide whether the e
 
 Output format - THIS IS MANDATORY:
 - Reply with a SINGLE raw JSON object and NOTHING else. No prose, no explanation, no markdown, no ``` fences.
-- Exact shape: {"ok": <true|false>, "issue": "<empty string if ok, otherwise a short reason>"}
+- Exact shape: {"ok": <true|false>, "issue": "<empty string if ok, otherwise a short reason>", "needs_evidence": <true|false>, "evidence_questions": ["short diagnostic question", ...]}
 - "ok" must be a JSON boolean (true/false), not a sentence.
+- If ok=true, set needs_evidence=false and evidence_questions=[].
 
 Decision rules:
 - Do NOT use outside/world knowledge to reject a result. If the database says a race, school, label, code, or
@@ -50,6 +51,9 @@ Decision rules:
   that NULL clearly expected.
 - Reject if the SQL errored; returned 0 rows when the question or exploration implies rows exist; uses filters,
   joins, inclusive/exclusive bounds, date handling, or literals that do not match the question and explored data.
+- If a likely problem is an unverified stored code, literal, time/date format, sentinel value, join key, grouping
+  grain, or answer shape, set ok=false, needs_evidence=true, and ask for 1-3 specific evidence_questions that would
+  prove the correct database values or shape.
 - Otherwise set ok=true.
 
 Do NOT describe the result in words. Output ONLY the JSON object."""
@@ -63,6 +67,9 @@ Execution result:
 
 Data exploration (each block is an exploration query and its real result):
 {findings}
+
+Targeted evidence accumulated during the loop:
+{evidence}
 """
 
 EXPLORE_SYSTEM = """You are a data analyst. BEFORE the final query is written, you explore the
@@ -85,6 +92,41 @@ EXPLORE_USER = """Schema:
 Question: {question}
 Return read-only SELECT exploration queries (separated by ';') to understand the data needed to answer it."""
 
+EVIDENCE_SYSTEM = """You write targeted SQLite diagnostic queries to resolve verifier doubts.
+
+Rules:
+- Output ONLY SQL SELECT statements separated by ';'. No prose, no markdown.
+- Each query must be read-only, small, and directly answer one evidence question.
+- Prefer DISTINCT values, grouped counts, sample rows, join-key checks, and alternative scalar calculations.
+- Use LIMIT for sample-row queries.
+- Do not write the final answer query; write diagnostics that help revise it."""
+
+EVIDENCE_USER = """Schema:
+{schema}
+
+Question:
+{question}
+
+Current SQL:
+{sql}
+
+Execution result:
+{execution}
+
+Verifier issue:
+{verify_issue}
+
+Evidence questions:
+{evidence_questions}
+
+Initial exploration:
+{findings}
+
+Prior targeted evidence:
+{evidence}
+
+Return read-only SELECT evidence queries separated by ';'."""
+
 REVISE_SYSTEM = """Fix the SQL query based on the verifier feedback and the gathered information. Output ONLY corrected SQL in ```sql block.
 When filtering or matching on a text column, compare case-insensitively with UPPER() on both sides
 (e.g. WHERE UPPER("col") = UPPER('value')) - stored capitalization often differs from the question."""
@@ -102,5 +144,8 @@ Verifier issue:
 {verify_issue}
 Information gathered from the database (each block is an exploration query and its real result; use the real values/formats shown here):
 {findings}
+
+Targeted evidence gathered during the loop (preserve these facts; do not forget earlier evidence):
+{evidence}
 
 Write a corrected SELECT."""

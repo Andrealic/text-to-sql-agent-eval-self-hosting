@@ -23,6 +23,16 @@ from agent.graph import AgentState, verify_node  # noqa: E402
 OK = '{"ok": true, "issue": ""}'
 NO = '{"ok": false, "issue": "wrong columns"}'
 NO2 = '{"ok": false, "issue": "zero rows"}'
+NO_EVIDENCE = (
+    '{"ok": false, "issue": "literal may use display value instead of stored code", '
+    '"needs_evidence": true, '
+    '"evidence_questions": ["Check distinct client.gender values", "Count rows by gender"]}'
+)
+NO_EVIDENCE_DUP = (
+    '{"ok": false, "issue": "stored code is unverified", '
+    '"needs_evidence": true, '
+    '"evidence_questions": ["Check distinct client.gender values"]}'
+)
 PROSE = "The query returns **339** male clients in the 'Hl.m. Praha' district."  # parse-fail
 
 
@@ -87,6 +97,18 @@ def test_votes_recorded_in_history():
     entry = out["history"][-1]
     assert entry["node"] == "verify"
     assert len(entry["votes"]) == 3
+
+
+def test_rejected_votes_can_request_deduped_evidence():
+    out = _verify_with([NO_EVIDENCE, OK, NO_EVIDENCE_DUP])
+    assert out["verify_ok"] is False
+    assert out["needs_evidence"] is True
+    assert out["evidence_questions"] == [
+        "Check distinct client.gender values",
+        "Count rows by gender",
+    ]
+    entry = out["history"][-1]
+    assert entry["needs_evidence"] is True
 
 
 def _main() -> int:

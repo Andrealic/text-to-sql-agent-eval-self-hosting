@@ -52,6 +52,8 @@ LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
 class VerifyResult(BaseModel):
     ok: bool = False
     issue: str = ""
+    needs_evidence: bool = False
+    evidence_questions: list[str] = []
 
 @dataclass
 class AgentState:
@@ -64,7 +66,10 @@ class AgentState:
     execution: ExecutionResult | None = None
     verify_ok: bool = False
     verify_issue: str = ""
+    needs_evidence: bool = False
+    evidence_questions: list[str] = field(default_factory=list)
     findings: dict[str, str] = field(default_factory=dict)
+    evidence: list[dict[str, Any]] = field(default_factory=list)
     revise_result: str = ""
     iteration: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -104,21 +109,22 @@ def _attach_schema(state: AgentState) -> dict:
     return {"schema": render_schema(state.db_id)}
 
 
-def _parse_verify_json(text: str) -> tuple[bool, str]:
+def _parse_verify_json(text: str) -> VerifyResult:
     fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
     raw = (fenced.group(1) if fenced else text).strip()
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end != -1:
         raw = raw[start : end + 1]
     try:
-        result = VerifyResult.model_validate_json(raw)
-        return result.ok, result.issue
+        return VerifyResult.model_validate_json(raw)
     except ValidationError:
-        return False, "could not parse verifier output"
+        return VerifyResult(ok=False, issue="could not parse verifier output")
 
 # Bounds for the explore step: keep the LLM-proposed exploration cheap and its
 # output small enough to fit the revise prompt.
 MAX_EXPLORE_QUERIES = 6
+MAX_EVIDENCE_QUERIES = 4
+MAX_EVIDENCE_BLOCKS = 10
 EXPLORE_MAX_ROWS = 15
 EXPLORE_MAX_CELL = 80
 
@@ -146,6 +152,25 @@ def _findings_text(findings: dict[str, str]) -> str:
     if not findings:
         return "(no exploration queries returned)"
     return "\n\n".join(f"-- {query}\n{result}" for query, result in findings.items())
+
+
+def _evidence_text(evidence: list[dict[str, Any]]) -> str:
+    """Render accumulated targeted evidence without dropping older loop facts."""
+    if not evidence:
+        return "(no targeted evidence gathered)"
+
+    blocks = []
+    for i, entry in enumerate(evidence[-MAX_EVIDENCE_BLOCKS:], start=1):
+        questions = entry.get("questions") or []
+        findings = entry.get("findings") or {}
+        rendered_findings = _findings_text(findings)
+        blocks.append(
+            f"Evidence round {i}\n"
+            f"Issue: {entry.get('issue', '')}\n"
+            f"Questions: {'; '.join(questions) if questions else '(none)'}\n"
+            f"{rendered_findings}"
+        )
+    return "\n\n".join(blocks)
 
 
 def explore_node(state: AgentState) -> dict:
@@ -218,6 +243,7 @@ def verify_node(state: AgentState) -> dict:
             schema=state.schema,
             question=state.question,
             findings=_findings_text(state.findings),
+            evidence=_evidence_text(state.evidence),
             sql=state.sql,
             execution=state.execution.render(),
         )),
@@ -225,29 +251,98 @@ def verify_node(state: AgentState) -> dict:
     client = llm(VERIFY_TEMPERATURE)
     votes = []
     for _ in range(N_VERIFY_VOTERS):
-        ok, issue = _parse_verify_json(client.invoke(messages).content)
-        votes.append({"ok": ok, "issue": issue})
+        result = _parse_verify_json(client.invoke(messages).content)
+        votes.append({
+            "ok": result.ok,
+            "issue": result.issue,
+            "needs_evidence": result.needs_evidence,
+            "evidence_questions": result.evidence_questions,
+        })
 
     n_ok = sum(1 for v in votes if v["ok"])
     verify_ok = n_ok > N_VERIFY_VOTERS / 2  # strict majority
 
     if verify_ok:
         verify_issue = "none"
+        needs_evidence = False
+        evidence_questions: list[str] = []
     else:
         # Reasons from every voter that rejected (deduped, order preserved).
         reasons = [v["issue"] for v in votes if not v["ok"] and v["issue"]]
         verify_issue = " | ".join(dict.fromkeys(reasons)) or "rejected by verifier pool"
+        evidence_questions = [
+            q
+            for v in votes
+            if not v["ok"] and v.get("needs_evidence")
+            for q in (v.get("evidence_questions") or [])
+            if q
+        ]
+        evidence_questions = list(dict.fromkeys(evidence_questions))[:MAX_EVIDENCE_QUERIES]
+        needs_evidence = bool(evidence_questions)
 
-    print(f"verify pool: {n_ok}/{N_VERIFY_VOTERS} ok -> verify_ok={verify_ok}")
+    print(
+        f"verify pool: {n_ok}/{N_VERIFY_VOTERS} ok -> verify_ok={verify_ok} "
+        f"needs_evidence={needs_evidence}"
+    )
     return {
         "verify_ok": verify_ok,
         "verify_issue": verify_issue,
+        "needs_evidence": needs_evidence,
+        "evidence_questions": evidence_questions,
         "history": state.history + [{
             "node": "verify",
             "verify_ok": verify_ok,
             "verify_issue": verify_issue,
+            "needs_evidence": needs_evidence,
+            "evidence_questions": evidence_questions,
             "votes": votes,
         }],
+    }
+
+
+def evidence_node(state: AgentState) -> dict:
+    """Gather verifier-requested evidence and keep it for the whole loop."""
+    if not state.evidence_questions:
+        return {
+            "needs_evidence": False,
+            "history": state.history + [{"node": "evidence", "findings": {}}],
+        }
+
+    response = llm().invoke([
+        ("system", prompts.EVIDENCE_SYSTEM),
+        ("user", prompts.EVIDENCE_USER.format(
+            schema=state.schema,
+            question=state.question,
+            sql=state.sql,
+            execution=state.execution.render(),
+            verify_issue=state.verify_issue,
+            evidence_questions="\n".join(f"- {q}" for q in state.evidence_questions),
+            findings=_findings_text(state.findings),
+            evidence=_evidence_text(state.evidence),
+        )),
+    ])
+    queries = extract_statements(response.content)[:MAX_EVIDENCE_QUERIES]
+
+    existing_queries = {
+        query
+        for entry in state.evidence
+        for query in (entry.get("findings") or {})
+    }
+    findings = {
+        q: _render_rows(execute_sql(state.db_id, q))
+        for q in queries
+        if q not in existing_queries
+    }
+    entry = {
+        "issue": state.verify_issue,
+        "questions": state.evidence_questions,
+        "findings": findings,
+    }
+    return {
+        "evidence": (state.evidence + [entry])[-MAX_EVIDENCE_BLOCKS:],
+        "needs_evidence": False,
+        "evidence_questions": [],
+        "history": state.history + [{"node": "evidence", **entry}],
     }
 
 
@@ -271,27 +366,30 @@ def revise_node(state: AgentState) -> dict:
             verify_ok=state.verify_ok,
             verify_issue=state.verify_issue,
             findings=_findings_text(state.findings),
+            evidence=_evidence_text(state.evidence),
         )),
     ])
     revise_result = extract_sql(response.content)
     return {
-    "sql": revise_result,
-    "iteration": state.iteration + 1,
-    "history": state.history + [{"node": "revise", "sql": revise_result}],
-}
+        "sql": revise_result,
+        "iteration": state.iteration + 1,
+        "history": state.history + [{"node": "revise", "sql": revise_result}],
+    }
 
 
 def route_after_verify(state: AgentState) -> str:
-    """Conditional router: return "revise" to loop, "end" to terminate.
+    """Conditional router: return "evidence", "revise", or "end".
 
     Two reasons to end: the verifier was happy (state.verify_ok), or you've hit
-    the iteration cap (state.iteration >= MAX_ITERATIONS). Otherwise revise -
-    the data exploration already happened up front, so revise reuses it.
+    the iteration cap (state.iteration >= MAX_ITERATIONS). If the verifier asks
+    for targeted evidence, gather it before revise; otherwise revise directly.
     """
     if state.verify_ok:
         return "end"
     elif state.iteration >= MAX_ITERATIONS:
         return "end"
+    elif state.needs_evidence and state.evidence_questions:
+        return "evidence"
     else:
         return "revise"
 
@@ -305,6 +403,7 @@ def build_graph():
     g.add_node("generate_sql", generate_sql_node)
     g.add_node("execute", execute_node)
     g.add_node("verify", verify_node)
+    g.add_node("evidence", evidence_node)
     g.add_node("revise", revise_node)
 
     g.add_edge(START, "attach_schema")
@@ -315,8 +414,9 @@ def build_graph():
     g.add_conditional_edges(
         "verify",
         route_after_verify,
-        {"revise": "revise", "end": END},
+        {"evidence": "evidence", "revise": "revise", "end": END},
     )
+    g.add_edge("evidence", "revise")
     g.add_edge("revise", "execute")
     return g.compile()
 
