@@ -30,3 +30,6 @@ evals/eval_set.jsonl
 
 # Lecture material (not part of the student repo)
 *.pdf
+
+ultraplan.md
+evals/*
