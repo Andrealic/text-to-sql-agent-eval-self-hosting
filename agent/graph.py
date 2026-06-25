@@ -70,17 +70,29 @@ class AgentState:
     history: list[dict[str, Any]] = field(default_factory=list)
 
 
+# A single stalled upstream LLM call (we have seen ~657s) otherwise hangs the
+# whole /answer with no recovery, because the DB side is sub-millisecond and never
+# the bottleneck. Bound the LLM call and let it retry a couple of times.
+LLM_REQUEST_TIMEOUT = float(os.environ.get("LLM_REQUEST_TIMEOUT", "60"))
+LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "2"))
+
+
 def llm(temperature: float = 0.0) -> ChatOpenRouter:
     """Chat client pointed at VLLM_BASE_URL (your local vLLM by default).
 
     temperature is a parameter so the verify pooling can sample independent
     voters (temperature > 0) while the other nodes stay deterministic (0.0).
+
+    request_timeout + max_retries bound each LLM call: a stalled upstream
+    request fails fast and retries instead of hanging the whole graph run.
     """
     return ChatOpenRouter(
         model=VLLM_MODEL,
         base_url=VLLM_BASE_URL,
         api_key=LLM_API_KEY,
         temperature=temperature,
+        request_timeout=LLM_REQUEST_TIMEOUT,
+        max_retries=LLM_MAX_RETRIES,
     )
 
 
