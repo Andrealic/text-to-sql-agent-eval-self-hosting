@@ -14,6 +14,9 @@ Rules:
 - Use double-quoted identifiers when names have spaces or reserved words.
 - No INSERT/UPDATE/DELETE/DROP or other DML and non-read-only statements.
 - Sample values and metrics gathered from the database are provided.
+- When filtering or matching on a text column, compare case-insensitively with
+  UPPER() on both sides, e.g. WHERE UPPER("col") = UPPER('value'), because the
+  stored capitalization often differs from how the question phrases it.
 """
 
 
@@ -58,7 +61,9 @@ EXPLORE_USER = """Schema:
 Question: {question}
 Return read-only SELECT exploration queries (separated by ';') to understand the data needed to answer it."""
 
-REVISE_SYSTEM = """Fix the SQL query based on the verifier feedback and the gathered information. Output ONLY corrected SQL in ```sql block."""
+REVISE_SYSTEM = """Fix the SQL query based on the verifier feedback and the gathered information. Output ONLY corrected SQL in ```sql block.
+When filtering or matching on a text column, compare case-insensitively with UPPER() on both sides
+(e.g. WHERE UPPER("col") = UPPER('value')) - stored capitalization often differs from the question."""
 
 REVISE_USER = """Schema:
 {schema}
