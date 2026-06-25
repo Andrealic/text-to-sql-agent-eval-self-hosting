@@ -63,7 +63,11 @@ few sample rows, and counts.
 Rules:
 - Output ONLY SQL SELECT statements separated by ';'. No prose, no markdown.
 - Each must be a single read-only SELECT. Keep them small with LIMIT.
-- A handful of focused queries is enough."""
+- A handful of focused queries is enough.
+- When filtering or matching on a text column, compare case-insensitively with
+  UPPER() on both sides, e.g. WHERE UPPER("col") = UPPER('value'), because the
+  stored capitalization often differs from how the question phrases it.
+"""
 
 EXPLORE_USER = """Schema:
 {schema}
