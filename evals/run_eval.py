@@ -26,7 +26,6 @@ import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EVAL_FILE = ROOT / "evals" / "eval_set.jsonl"
-DEFAULT_OUT_FILE = ROOT / "results" / "eval_baseline.json"
 DB_DIR = ROOT / "data" / "bird"
 AGENT_URL_DEFAULT = "http://localhost:8001/answer"
 
@@ -193,7 +192,12 @@ def summarize(results: list[dict]) -> dict:
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval-set", type=Path, default=DEFAULT_EVAL_FILE)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_FILE)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output file. Default: results/eval_<run_id>.json (so runs never overwrite each other).",
+    )
     parser.add_argument("--agent-url", default=AGENT_URL_DEFAULT)
     parser.add_argument(
         "--concurrency",
@@ -216,6 +220,7 @@ async def main() -> None:
 
     created_at = datetime.now(timezone.utc).isoformat()
     run_id = args.run_id or f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+    out_path = args.out or (ROOT / "results" / f"eval_{run_id}.json")
 
     questions = [json.loads(line) for line in args.eval_set.read_text().splitlines() if line.strip()]
     print(f"Loaded {len(questions)} eval questions from {args.eval_set}")
@@ -253,9 +258,9 @@ async def main() -> None:
         "wall_clock_seconds": elapsed,
         "results": results,
     }
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(out, indent=2))
-    print(f"Wrote {args.out} (run_id={run_id})")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, indent=2))
+    print(f"Wrote {out_path} (run_id={run_id})")
     print(json.dumps(summary, indent=2))
 
 
