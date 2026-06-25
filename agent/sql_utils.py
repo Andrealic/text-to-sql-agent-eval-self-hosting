@@ -36,19 +36,34 @@ def first_statement(sql: str) -> str:
     return statements[0] if statements else ""
 
 
-def extract_sql(text: str) -> str:
-    """Pull a single runnable SQL statement out of an LLM reply.
+def _unfenced_body(text: str) -> str:
+    """Strip markdown fences from an LLM reply, leaving the SQL/prose body.
 
-    If there is a closed ```sql block, take its contents. Otherwise drop lines
-    that are just stray fence markers. In both cases, keep only the first
-    statement so trailing prose/fences cannot trip sqlite's one-statement rule.
+    If there is a closed ```sql block, return its contents; otherwise drop lines
+    that are just stray fence markers and keep the rest.
     """
     fenced = re.search(r"```(?:sql)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
     if fenced:
-        body = fenced.group(1)
-    else:
-        body = "\n".join(
-            line for line in text.splitlines()
-            if not re.fullmatch(r"\s*```(?:sql)?\s*", line, re.IGNORECASE)
-        )
-    return first_statement(body.strip())
+        return fenced.group(1).strip()
+    return "\n".join(
+        line for line in text.splitlines()
+        if not re.fullmatch(r"\s*```(?:sql)?\s*", line, re.IGNORECASE)
+    ).strip()
+
+
+def extract_sql(text: str) -> str:
+    """Pull a single runnable SQL statement out of an LLM reply.
+
+    Strips fences, then keeps only the first statement so trailing prose/fences
+    cannot trip sqlite's one-statement rule.
+    """
+    return first_statement(_unfenced_body(text))
+
+
+def extract_statements(text: str) -> list[str]:
+    """Pull ALL SQL statements out of an LLM reply (fences stripped).
+
+    Used by the explorer node, which asks the model for several ';'-separated
+    exploration queries and runs each one.
+    """
+    return split_statements(_unfenced_body(text))
