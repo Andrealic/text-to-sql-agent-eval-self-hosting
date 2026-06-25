@@ -58,7 +58,7 @@ def health() -> dict[str, str]:
 def answer(req: AnswerRequest) -> AnswerResponse:
     state = AgentState(question=req.question, db_id=req.db)
     DEFAULT_TAGS = {
-        "agent_version": "v0.1.1"
+        "agent_version": "v0.1.2"
     }
     config: dict[str, Any] = {
         "callbacks": [_lf_handler] if _lf_handler is not None else [],
