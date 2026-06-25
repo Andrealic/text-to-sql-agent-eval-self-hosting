@@ -13,12 +13,20 @@ Rules:
 - Output ONLY the SQL inside a ```sql fenced block.
 - Use double-quoted identifiers when names have spaces or reserved words.
 - No INSERT/UPDATE/DELETE/DROP or other DML and non-read-only statements.
+- Sample values and metrics gathered from the database are provided.
 """
 
 
-# Available placeholders: {schema}, {question}
+# Available placeholders: {schema}, {findings}, {question}
 GENERATE_SQL_USER = """Schema:
 {schema}
+
+Exploration queries:
+{exploration_queries}
+
+Data exploration (real values and formats from the database):
+{findings}
+
 Question: {question}
 """
 
@@ -29,11 +37,34 @@ Mark ok=false if: SQL error, 0 rows when the question expects for sure data, wro
 VERIFY_USER = """Question: {question}
 SQL executed:
 {sql}
+
 Execution result:
 {execution}
+
+Exploration queries:
+{exploration_queries}
+
+Data exploration (real values and formats from the database):
+{findings}
 """
 
-REVISE_SYSTEM = """Fix the SQL query based on the verifier feedback. Output ONLY corrected SQL in ```sql block."""
+EXPLORE_SYSTEM = """You are a data analyst. BEFORE the final query is written, you explore the
+database to understand the data needed to answer the question - exactly as an analyst would
+poke at the tables first. Propose READ-ONLY exploration queries that reveal: the distinct
+values actually stored in the relevant columns, their exact format (date strings, codes), a
+few sample rows, and counts.
+
+Rules:
+- Output ONLY SQL SELECT statements separated by ';'. No prose, no markdown.
+- Each must be a single read-only SELECT. Keep them small with LIMIT.
+- A handful of focused queries is enough."""
+
+EXPLORE_USER = """Schema:
+{schema}
+Question: {question}
+Return read-only SELECT exploration queries (separated by ';') to understand the data needed to answer it."""
+
+REVISE_SYSTEM = """Fix the SQL query based on the verifier feedback and the gathered information. Output ONLY corrected SQL in ```sql block."""
 
 REVISE_USER = """Schema:
 {schema}
@@ -44,6 +75,11 @@ Execution result:
 {execution}
 Verifier ok:
 {verify_ok}
-Verifier issue: 
-{verify_issue} 
+Verifier issue:
+{verify_issue}
+Information gathered from the database (use the real values/formats shown here):
+{findings}
+Exploration queries:
+{exploration_queries}
+
 Write a corrected SELECT."""

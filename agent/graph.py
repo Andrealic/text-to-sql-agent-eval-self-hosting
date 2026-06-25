@@ -28,7 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
 from agent.schema import render_schema
-from agent.sql_utils import extract_sql
+from agent.sql_utils import extract_sql, extract_statements
 from pydantic import BaseModel, ValidationError
 
 # Total generate + revise calls before the loop is forced to stop.
@@ -58,6 +58,8 @@ class AgentState:
     execution: ExecutionResult | None = None
     verify_ok: bool = False
     verify_issue: str = ""
+    exploration_queries: list[str] = field(default_factory=list)
+    findings: dict[str, str] = field(default_factory=dict)
     revise_result: str = ""
     iteration: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -92,6 +94,62 @@ def _parse_verify_json(text: str) -> tuple[bool, str]:
     except ValidationError:
         return False, "could not parse verifier output"
 
+# Bounds for the explore step: keep the LLM-proposed exploration cheap and its
+# output small enough to fit the revise prompt.
+MAX_EXPLORE_QUERIES = 6
+EXPLORE_MAX_ROWS = 15
+EXPLORE_MAX_CELL = 80
+
+
+def _render_rows(execution: ExecutionResult) -> str:
+    """Compact rendering of an exploration query result, with long cells truncated."""
+    if not execution.ok:
+        return f"ERROR: {execution.error}"
+    rows = execution.rows or []
+    if not rows:
+        return "(0 rows)"
+
+    def cell(c: Any) -> str:
+        s = "" if c is None else str(c)
+        return s if len(s) <= EXPLORE_MAX_CELL else s[:EXPLORE_MAX_CELL] + "…"
+
+    cols = ", ".join(execution.columns or [])
+    body = "\n".join(" | ".join(cell(c) for c in r) for r in rows[:EXPLORE_MAX_ROWS])
+    more = f"\n... (+{len(rows) - EXPLORE_MAX_ROWS} more rows)" if len(rows) > EXPLORE_MAX_ROWS else ""
+    return f"columns: {cols}\n{body}{more}"
+
+
+def _findings_text(findings: dict[str, str]) -> str:
+    """Render the {query: result} findings dict into readable prompt text."""
+    if not findings:
+        return "(no exploration queries returned)"
+    return "\n\n".join(f"-- {query}\n{result}" for query, result in findings.items())
+
+
+def explore_node(state: AgentState) -> dict:
+    """Explore the data up front, like a data analyst, before any SQL is written.
+
+    Runs once after attach_schema. One LLM call proposes read-only exploration
+    queries from the question + schema (distinct values, formats, sample rows,
+    counts). We parse them with our ';' splitter, run each read-only (bounded +
+    truncated), and store the findings so generate_sql (and later revise) filter
+    on the real literals/formats instead of guessing.
+    """
+    response = llm().invoke([
+        ("system", prompts.EXPLORE_SYSTEM),
+        ("user", prompts.EXPLORE_USER.format(
+            schema=state.schema,
+            question=state.question,
+        )),
+    ])
+    exploration_queries = extract_statements(response.content)[:MAX_EXPLORE_QUERIES]
+    findings = {q: _render_rows(execute_sql(state.db_id, q)) for q in exploration_queries}
+    return {
+        "exploration_queries": exploration_queries,
+        "findings": findings,
+        "history": state.history + [{"node": "explore", "exploration_queries": exploration_queries, "findings": findings}],
+    }
+
 def generate_sql_node(state: AgentState) -> dict:
     """Worked example - the other LLM nodes follow this same shape.
 
@@ -106,6 +164,8 @@ def generate_sql_node(state: AgentState) -> dict:
         ("system", prompts.GENERATE_SQL_SYSTEM),
         ("user", prompts.GENERATE_SQL_USER.format(
             schema=state.schema,
+            exploration_queries="\n".join(state.exploration_queries),
+            findings=_findings_text(state.findings),
             question=state.question,
         )),
     ])
@@ -140,6 +200,8 @@ def verify_node(state: AgentState) -> dict:
         ("user", prompts.VERIFY_USER.format(
             schema=state.schema,
             question=state.question,
+            exploration_queries="\n".join(state.exploration_queries),
+            findings=_findings_text(state.findings),
             sql=state.sql,
             execution=state.execution.render(),
         )),
@@ -157,10 +219,10 @@ def verify_node(state: AgentState) -> dict:
 def revise_node(state: AgentState) -> dict:
     """Produce a revised SQL query given state.verify_issue and the prior attempt.
 
-    Same shape as generate_sql_node, but the prompt should include the failing
-    SQL, its execution result, and the verifier's complaint so the model can fix
-    it. Bump the iteration counter the same way generate_sql_node does so the
-    loop terminates.
+    Same shape as generate_sql_node, but the prompt also includes the failing
+    SQL, its execution result, the verifier's complaint, and the findings the
+    explore node gathered. Bump the iteration counter the same way
+    generate_sql_node does so the loop terminates.
 
     Return: {"sql": <str>, "iteration": state.iteration + 1, ...}.
     """
@@ -173,6 +235,8 @@ def revise_node(state: AgentState) -> dict:
             execution=state.execution.render(),
             verify_ok=state.verify_ok,
             verify_issue=state.verify_issue,
+            exploration_queries="\n".join(state.exploration_queries),
+            findings=_findings_text(state.findings),
         )),
     ])
     revise_result = extract_sql(response.content)
@@ -187,7 +251,8 @@ def route_after_verify(state: AgentState) -> str:
     """Conditional router: return "revise" to loop, "end" to terminate.
 
     Two reasons to end: the verifier was happy (state.verify_ok), or you've hit
-    the iteration cap (state.iteration >= MAX_ITERATIONS). Otherwise, revise.
+    the iteration cap (state.iteration >= MAX_ITERATIONS). Otherwise revise -
+    the data exploration already happened up front, so revise reuses it.
     """
     if state.verify_ok:
         return "end"
@@ -202,13 +267,15 @@ def route_after_verify(state: AgentState) -> str:
 def build_graph():
     g = StateGraph(AgentState)
     g.add_node("attach_schema", _attach_schema)
+    g.add_node("explore", explore_node)
     g.add_node("generate_sql", generate_sql_node)
     g.add_node("execute", execute_node)
     g.add_node("verify", verify_node)
     g.add_node("revise", revise_node)
 
     g.add_edge(START, "attach_schema")
-    g.add_edge("attach_schema", "generate_sql")
+    g.add_edge("attach_schema", "explore")
+    g.add_edge("explore", "generate_sql")
     g.add_edge("generate_sql", "execute")
     g.add_edge("execute", "verify")
     g.add_conditional_edges(
