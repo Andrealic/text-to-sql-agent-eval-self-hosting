@@ -79,7 +79,7 @@ def _attempts_from_history(history: list[dict], fallback_sql: str) -> list[dict]
     return attempts
 
 
-async def eval_one(question: dict, client: httpx.AsyncClient, agent_url: str) -> dict:
+async def eval_one(question: dict, client: httpx.AsyncClient, agent_url: str, timeout: float = 120.0) -> dict:
     """Score one question. Return a dict capturing per-iteration correctness."""
     db_id = question["db_id"]
     gold_ok, gold_rows, gold_err = await asyncio.to_thread(run_sql, db_id, question["gold_sql"])
@@ -96,7 +96,7 @@ async def eval_one(question: dict, client: httpx.AsyncClient, agent_url: str) ->
         resp = await client.post(
             agent_url,
             json={"question": question["question"], "db": db_id},
-            timeout=120.0,
+            timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -206,6 +206,12 @@ async def main() -> None:
         default=None,
         help="Identifier for this run (default: <UTC timestamp>-<short uuid>). Lets results be tracked/compared.",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Per-request timeout (s) for the agent HTTP call. Raise it when a slow backend needs more time per run.",
+    )
     args = parser.parse_args()
 
     created_at = datetime.now(timezone.utc).isoformat()
@@ -220,7 +226,7 @@ async def main() -> None:
     async def worker(q: dict, client: httpx.AsyncClient) -> dict:
         nonlocal done
         async with sem:
-            result = await eval_one(q, client, args.agent_url)
+            result = await eval_one(q, client, args.agent_url, timeout=args.timeout)
         done += 1
         print(f"[{done}/{len(questions)}] {q['db_id']}: {q['question'][:60]}...", flush=True)
         return result
@@ -238,6 +244,7 @@ async def main() -> None:
             "eval_set": str(args.eval_set),
             "agent_url": args.agent_url,
             "concurrency": args.concurrency,
+            "timeout": args.timeout,
             "n_questions": len(questions),
             "model": os.environ.get("VLLM_MODEL"),
             "base_url": os.environ.get("VLLM_BASE_URL"),
