@@ -80,25 +80,46 @@ def _attach_schema(state: AgentState) -> dict:
     return {"schema": render_schema(state.db_id)}
 
 
-def _first_statement(sql: str) -> str:
-    """Keep only the first SQL statement, dropping anything after the first ';'.
+def _split_statements(sql: str) -> list[str]:
+    """Split SQL into its individual statements, ignoring ';' inside quoted strings.
 
-    sqlite refuses to run more than one statement at once ("You can only execute
-    one statement at a time"). The model sometimes appends a stray ``` fence or a
-    line of prose after the query, which becomes a bogus second statement. We cut
-    at the first ';' that is NOT inside a quoted string, so a query that legitimately
-    contains ';' inside quotes (e.g. WHERE x = 'a;b') is left intact.
+    Returns the non-empty statements, each stripped of surrounding whitespace and
+    the separating ';'. A plain str.split(';') would break a query that legitimately
+    contains ';' inside a literal (e.g. WHERE x = 'a;b'); we only treat a ';' as a
+    separator when it is outside quotes. SQLite escapes quotes by doubling them
+    ('' / ""), which the toggle handles naturally (off then on = unchanged state).
+
+    Kept general (returns every statement) so it can be reused later; this agent
+    only ever runs the first one - see _first_statement.
     """
-    sql = sql.strip().lstrip(";").strip()
+    statements: list[str] = []
     in_single = in_double = False
+    start = 0
     for i, ch in enumerate(sql):
         if ch == "'" and not in_double:
             in_single = not in_single
         elif ch == '"' and not in_single:
             in_double = not in_double
         elif ch == ";" and not in_single and not in_double:
-            return sql[:i].strip()
-    return sql.rstrip(";").strip()
+            stmt = sql[start:i].strip()
+            if stmt:
+                statements.append(stmt)
+            start = i + 1
+    tail = sql[start:].strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+def _first_statement(sql: str) -> str:
+    """The first runnable statement, or "" if there is none.
+
+    sqlite refuses to run more than one statement at once ("You can only execute
+    one statement at a time"), and the model sometimes appends a stray ``` fence
+    or prose after the query; we keep only the first statement.
+    """
+    statements = _split_statements(sql)
+    return statements[0] if statements else ""
 
 
 def _extract_sql(text: str) -> str:

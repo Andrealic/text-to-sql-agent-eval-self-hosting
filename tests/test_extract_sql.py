@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from agent.execution import execute_sql  # noqa: E402
-from agent.graph import _extract_sql, _first_statement  # noqa: E402
+from agent.graph import _extract_sql, _first_statement, _split_statements  # noqa: E402
 
 # The exact iteration-0 reply for the Coldsnap question: a valid query, then a
 # stray closing fence on its own line, with no opening fence. This is what broke.
@@ -79,6 +79,19 @@ def test_plain_fenced_block_still_works():
 
 def test_trailing_second_statement_dropped():
     assert _extract_sql("SELECT 1; DROP TABLE t;") == "SELECT 1"
+
+
+def test_split_statements_returns_all():
+    """The general splitter keeps every statement (agent only takes the first)."""
+    assert _split_statements("SELECT 1; SELECT 2; SELECT 3") == ["SELECT 1", "SELECT 2", "SELECT 3"]
+
+
+def test_split_statements_ignores_semicolon_in_quotes():
+    assert _split_statements("SELECT 'a;b'; SELECT 2") == ["SELECT 'a;b'", "SELECT 2"]
+
+
+def test_split_statements_skips_empty_fragments():
+    assert _split_statements(";; SELECT 1 ;;") == ["SELECT 1"]
 
 
 # --- standalone runner (works without pytest) --------------------------------
