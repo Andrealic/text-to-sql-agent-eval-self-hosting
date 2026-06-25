@@ -8,7 +8,9 @@ agent's final SQL, the result rows, and per-iteration history.
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Any
 
 from dotenv import load_dotenv
@@ -18,6 +20,9 @@ from pydantic import BaseModel
 load_dotenv()
 
 from agent.graph import AgentState, graph  # noqa: E402
+
+# Use uvicorn's configured logger so request summaries show up with the server logs.
+logger = logging.getLogger("uvicorn.error")
 
 # Langfuse callback handler. If keys are set we initialize it; failures
 # are NOT swallowed - a misconfigured Langfuse should not silently
@@ -32,6 +37,19 @@ if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY
 
 
 app = FastAPI()
+
+
+def _short_question(question: str, max_len: int = 120) -> str:
+    """Keep request logs useful without dumping long prompts."""
+    compact = " ".join(question.split())
+    return compact if len(compact) <= max_len else compact[: max_len - 1] + "..."
+
+
+def _last_verify(history: list[dict[str, Any]]) -> tuple[bool | None, str | None]:
+    for entry in reversed(history):
+        if entry.get("node") == "verify":
+            return entry.get("verify_ok"), entry.get("verify_issue")
+    return None, None
 
 
 class AnswerRequest(BaseModel):
@@ -56,17 +74,32 @@ def health() -> dict[str, str]:
 
 @app.post("/answer", response_model=AnswerResponse)
 def answer(req: AnswerRequest) -> AnswerResponse:
+    started = time.perf_counter()
     state = AgentState(question=req.question, db_id=req.db)
     DEFAULT_TAGS = {
         "agent_version": "v0.1.4"
     }
+    metadata = {**DEFAULT_TAGS, **req.tags}
+    logger.info(
+        "answer_start db=%s tags=%s question=%r",
+        req.db,
+        metadata,
+        _short_question(req.question),
+    )
     config: dict[str, Any] = {
         "callbacks": [_lf_handler] if _lf_handler is not None else [],
-        "metadata": {**DEFAULT_TAGS, **req.tags},
+        "metadata": metadata,
     }
     try:
         final = graph.invoke(state, config=config)
     except Exception as e:  # noqa: BLE001
+        elapsed = time.perf_counter() - started
+        logger.exception(
+            "answer_error db=%s elapsed_seconds=%.3f error=%s",
+            req.db,
+            elapsed,
+            f"{type(e).__name__}: {e}",
+        )
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
     finally:
         if _lf_handler is not None:
@@ -76,8 +109,20 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     iteration = final.get("iteration", 0)
     history = final.get("history", [])
     execution = final.get("execution")
+    verify_ok, verify_issue = _last_verify(history)
+    elapsed = time.perf_counter() - started
 
     if execution is None:
+        logger.warning(
+            "answer_complete ok=false db=%s elapsed_seconds=%.3f iterations=%s "
+            "verify_ok=%s verify_issue=%r error=%r",
+            req.db,
+            elapsed,
+            iteration,
+            verify_ok,
+            verify_issue,
+            "agent produced no execution result",
+        )
         return AnswerResponse(
             sql=sql,
             rows=None,
@@ -87,6 +132,16 @@ def answer(req: AnswerRequest) -> AnswerResponse:
             history=history,
         )
     if not execution.ok:
+        logger.warning(
+            "answer_complete ok=false db=%s elapsed_seconds=%.3f iterations=%s "
+            "verify_ok=%s verify_issue=%r error=%r",
+            req.db,
+            elapsed,
+            iteration,
+            verify_ok,
+            verify_issue,
+            execution.error,
+        )
         return AnswerResponse(
             sql=sql,
             rows=None,
@@ -96,6 +151,16 @@ def answer(req: AnswerRequest) -> AnswerResponse:
             history=history,
         )
 
+    logger.info(
+        "answer_complete ok=true db=%s elapsed_seconds=%.3f iterations=%s "
+        "verify_ok=%s verify_issue=%r row_count=%s",
+        req.db,
+        elapsed,
+        iteration,
+        verify_ok,
+        verify_issue,
+        execution.row_count,
+    )
     return AnswerResponse(
         sql=sql,
         rows=[list(r) for r in (execution.rows or [])],
