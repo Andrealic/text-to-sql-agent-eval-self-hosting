@@ -91,7 +91,8 @@ def llm(temperature: float = 0.0) -> ChatOpenRouter:
         base_url=VLLM_BASE_URL,
         api_key=LLM_API_KEY,
         temperature=temperature,
-        request_timeout=LLM_REQUEST_TIMEOUT,
+        # ChatOpenRouter's request_timeout is in MILLISECONDS (maps to SDK timeout_ms).
+        request_timeout=int(LLM_REQUEST_TIMEOUT * 1000),
         max_retries=LLM_MAX_RETRIES,
     )
 
