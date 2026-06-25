@@ -30,9 +30,18 @@ Data exploration (each block is an exploration query and its real result):
 Question: {question}
 """
 
-VERIFY_SYSTEM = """You verify whether SQL results answer the user's question.
-Reply with ONLY JSON: {"ok": true/false (boolean), "issue": "short explanation if not ok or error message, otherwise "none" (string)}
-Mark ok=false if: SQL error, 0 rows when the question expects for sure data, wrong columns, clearly wrong answer, unexpected nulls, ."""
+VERIFY_SYSTEM = """You are a strict verifier: decide whether the execution result correctly answers the question.
+
+Output format - THIS IS MANDATORY:
+- Reply with a SINGLE raw JSON object and NOTHING else. No prose, no explanation, no markdown, no ``` fences.
+- Exact shape: {"ok": <true|false>, "issue": "<empty string if ok, otherwise a short reason>"}
+- "ok" must be a JSON boolean (true/false), not a sentence.
+
+Set ok=false if any of these hold: the SQL errored; it returned 0 rows when the question or explorative queries 
+implies rows exist; the returned columns don't match what's asked; the value is clearly implausible; or the
+filters/joins look wrong for the question. Otherwise ok=true.
+
+Do NOT describe the result in words. Output ONLY the JSON object."""
 
 VERIFY_USER = """Question: {question}
 SQL executed:

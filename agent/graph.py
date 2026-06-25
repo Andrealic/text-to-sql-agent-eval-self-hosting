@@ -35,6 +35,12 @@ from pydantic import BaseModel, ValidationError
 # 3-5 is a reasonable range; tune it as part of Phase 3.
 MAX_ITERATIONS = 3
 
+# Verify is a pool of independent voters; the answer passes on a majority.
+# Sampled at VERIFY_TEMPERATURE so the voters are not identical. Each voter is
+# one LLM call, so verify costs N_VERIFY_VOTERS calls per iteration.
+N_VERIFY_VOTERS = 3
+VERIFY_TEMPERATURE = 0.4
+
 #VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 #VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "https://openrouter.ai/api/v1")
@@ -64,13 +70,17 @@ class AgentState:
     history: list[dict[str, Any]] = field(default_factory=list)
 
 
-def llm() -> ChatOpenRouter:
-    """Chat client pointed at VLLM_BASE_URL (your local vLLM by default)."""
+def llm(temperature: float = 0.0) -> ChatOpenRouter:
+    """Chat client pointed at VLLM_BASE_URL (your local vLLM by default).
+
+    temperature is a parameter so the verify pooling can sample independent
+    voters (temperature > 0) while the other nodes stay deterministic (0.0).
+    """
     return ChatOpenRouter(
         model=VLLM_MODEL,
         base_url=VLLM_BASE_URL,
         api_key=LLM_API_KEY,
-        temperature=0.0,
+        temperature=temperature,
     )
 
 
@@ -180,19 +190,16 @@ def execute_node(state: AgentState) -> dict:
 
 
 def verify_node(state: AgentState) -> dict:
-    """Decide whether state.execution plausibly answers state.question.
+    """Pooled verification: N independent voters decide if the answer is plausible.
 
-    Follow the generate_sql_node pattern: build messages from the VERIFY_*
-    prompts, call llm(), parse the reply. Ask the model for a small JSON object
-    like {"ok": bool, "issue": str} and parse it defensively - the model may
-    wrap it in prose or fences. state.execution.render() gives you a compact
-    view of the rows or error to feed into the prompt.
-
-    Return: {"verify_ok": <str>, "verify_issue": <str>}.
-    What counts as "not plausible" is yours to define - see the Phase 3 targets
-    in the README.
+    Each voter is one LLM call (sampled at VERIFY_TEMPERATURE so they are not
+    identical) returning {"ok": bool, "issue": str}, parsed defensively. The
+    answer passes on a majority of ok votes (e.g. 2 of 3). A single voter that
+    replies in prose / fails to parse counts as one "not ok" vote, so it can no
+    longer sink a correct answer on its own. When it does not pass, we hand the
+    revise step the reasons from every voter that rejected it.
     """
-    response = llm().invoke([
+    messages = [
         ("system", prompts.VERIFY_SYSTEM),
         ("user", prompts.VERIFY_USER.format(
             schema=state.schema,
@@ -201,14 +208,33 @@ def verify_node(state: AgentState) -> dict:
             sql=state.sql,
             execution=state.execution.render(),
         )),
-    ])
-    verify_result = _parse_verify_json(response.content)
-    print(f"verify_result: {verify_result}")
+    ]
+    client = llm(VERIFY_TEMPERATURE)
+    votes = []
+    for _ in range(N_VERIFY_VOTERS):
+        ok, issue = _parse_verify_json(client.invoke(messages).content)
+        votes.append({"ok": ok, "issue": issue})
+
+    n_ok = sum(1 for v in votes if v["ok"])
+    verify_ok = n_ok > N_VERIFY_VOTERS / 2  # strict majority
+
+    if verify_ok:
+        verify_issue = "none"
+    else:
+        # Reasons from every voter that rejected (deduped, order preserved).
+        reasons = [v["issue"] for v in votes if not v["ok"] and v["issue"]]
+        verify_issue = " | ".join(dict.fromkeys(reasons)) or "rejected by verifier pool"
+
+    print(f"verify pool: {n_ok}/{N_VERIFY_VOTERS} ok -> verify_ok={verify_ok}")
     return {
-        "verify_ok": verify_result[0],
-        "verify_issue": verify_result[1],
-        "history": state.history + [{"node": "verify", "verify_ok": verify_result[0], "verify_issue": verify_result[1]}],
-        
+        "verify_ok": verify_ok,
+        "verify_issue": verify_issue,
+        "history": state.history + [{
+            "node": "verify",
+            "verify_ok": verify_ok,
+            "verify_issue": verify_issue,
+            "votes": votes,
+        }],
     }
 
 
