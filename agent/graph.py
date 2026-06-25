@@ -80,14 +80,46 @@ def _attach_schema(state: AgentState) -> dict:
     return {"schema": render_schema(state.db_id)}
 
 
-def _extract_sql(text: str) -> str:
-    """Pull a SQL statement out of an LLM reply, stripping markdown fences/prose.
+def _first_statement(sql: str) -> str:
+    """Keep only the first SQL statement, dropping anything after the first ';'.
 
-    Intentionally simple: take the first ```sql ... ``` block if there is one,
-    otherwise the whole reply. You may need to harden this for your prompts.
+    sqlite refuses to run more than one statement at once ("You can only execute
+    one statement at a time"). The model sometimes appends a stray ``` fence or a
+    line of prose after the query, which becomes a bogus second statement. We cut
+    at the first ';' that is NOT inside a quoted string, so a query that legitimately
+    contains ';' inside quotes (e.g. WHERE x = 'a;b') is left intact.
+    """
+    sql = sql.strip().lstrip(";").strip()
+    in_single = in_double = False
+    for i, ch in enumerate(sql):
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == ";" and not in_single and not in_double:
+            return sql[:i].strip()
+    return sql.rstrip(";").strip()
+
+
+def _extract_sql(text: str) -> str:
+    """Pull a single runnable SQL statement out of an LLM reply.
+
+    Three steps, in order:
+    1. If the reply has a closed ```sql ... ``` block, take what's inside it.
+    2. Otherwise the model left an unclosed/stray fence: drop any line that is
+       just a ``` marker and keep the rest.
+    3. Either way, reduce to the first statement (see _first_statement) so a
+       trailing fence or prose can't trip sqlite's one-statement rule.
     """
     fenced = re.search(r"```(?:sql)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    return (fenced.group(1) if fenced else text).strip()
+    if fenced:
+        body = fenced.group(1)
+    else:
+        body = "\n".join(
+            line for line in text.splitlines()
+            if not re.fullmatch(r"\s*```(?:sql)?\s*", line, re.IGNORECASE)
+        )
+    return _first_statement(body.strip())
 
 def _parse_verify_json(text: str) -> tuple[bool, str]:
     fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
