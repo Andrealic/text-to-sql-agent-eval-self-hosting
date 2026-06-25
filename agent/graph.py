@@ -16,7 +16,6 @@ conditional router following the same shape.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -29,6 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
 from agent.schema import render_schema
+from agent.sql_utils import extract_sql
 from pydantic import BaseModel, ValidationError
 
 # Total generate + revise calls before the loop is forced to stop.
@@ -80,15 +80,6 @@ def _attach_schema(state: AgentState) -> dict:
     return {"schema": render_schema(state.db_id)}
 
 
-def _extract_sql(text: str) -> str:
-    """Pull a SQL statement out of an LLM reply, stripping markdown fences/prose.
-
-    Intentionally simple: take the first ```sql ... ``` block if there is one,
-    otherwise the whole reply. You may need to harden this for your prompts.
-    """
-    fenced = re.search(r"```(?:sql)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    return (fenced.group(1) if fenced else text).strip()
-
 def _parse_verify_json(text: str) -> tuple[bool, str]:
     fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
     raw = (fenced.group(1) if fenced else text).strip()
@@ -118,7 +109,7 @@ def generate_sql_node(state: AgentState) -> dict:
             question=state.question,
         )),
     ])
-    sql = _extract_sql(response.content)
+    sql = extract_sql(response.content)
     return {
         "sql": sql,
         "iteration": state.iteration + 1,
@@ -184,7 +175,7 @@ def revise_node(state: AgentState) -> dict:
             verify_issue=state.verify_issue,
         )),
     ])
-    revise_result = _extract_sql(response.content)
+    revise_result = extract_sql(response.content)
     return {
     "sql": revise_result,
     "iteration": state.iteration + 1,
