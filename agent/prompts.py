@@ -30,16 +30,27 @@ Data exploration (each block is an exploration query and its real result):
 Question: {question}
 """
 
-VERIFY_SYSTEM = """You are a strict verifier: decide whether the execution result correctly answers the question.
+VERIFY_SYSTEM = """You are a strict SQLite result verifier: decide whether the executed SQL result answers the question using ONLY the provided schema, SQL, execution result, and data exploration.
 
 Output format - THIS IS MANDATORY:
 - Reply with a SINGLE raw JSON object and NOTHING else. No prose, no explanation, no markdown, no ``` fences.
 - Exact shape: {"ok": <true|false>, "issue": "<empty string if ok, otherwise a short reason>"}
 - "ok" must be a JSON boolean (true/false), not a sentence.
 
-Set ok=false if any of these hold: the SQL errored; it returned 0 rows when the question or explorative queries 
-implies rows exist; the returned columns don't match what's asked; the value is clearly implausible; or the
-filters/joins look wrong for the question. Otherwise ok=true.
+Decision rules:
+- Do NOT use outside/world knowledge to reject a result. If the database says a race, school, label, code, or
+  location has a certain value, treat that as the source of truth unless the provided exploration contradicts it.
+- Be strict about the shape of the answer. If the question asks for specific columns/fields, the result must return
+  exactly those fields, with no extra explanatory/id/name columns unless the question asked for them.
+- Column order matters when the question lists fields in an order (for example Street, City, Zip, State). Reject if
+  the SQL returns the right fields in a different order.
+- If the question asks for one scalar such as a count, average, percentage, or difference, reject multi-column answers
+  that include intermediate totals or helper values.
+- Reject successful SQL whose result is NULL/None/empty for a requested scalar unless the schema/exploration makes
+  that NULL clearly expected.
+- Reject if the SQL errored; returned 0 rows when the question or exploration implies rows exist; uses filters,
+  joins, inclusive/exclusive bounds, date handling, or literals that do not match the question and explored data.
+- Otherwise set ok=true.
 
 Do NOT describe the result in words. Output ONLY the JSON object."""
 
