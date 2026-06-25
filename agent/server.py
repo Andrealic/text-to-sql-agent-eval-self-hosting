@@ -77,7 +77,7 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     started = time.perf_counter()
     state = AgentState(question=req.question, db_id=req.db)
     DEFAULT_TAGS = {
-        "agent_version": "v0.1.4"
+        "agent_version": "v0.1.5"
     }
     metadata = {**DEFAULT_TAGS, **req.tags}
     logger.info(

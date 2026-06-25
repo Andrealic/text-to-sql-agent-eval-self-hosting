@@ -44,7 +44,7 @@ VERIFY_TEMPERATURE = 0.4
 #VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 #VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "https://openrouter.ai/api/v1")
-VLLM_MODEL = os.environ.get("VLLM_MODEL", "minimax/minimax-m2.5")
+VLLM_MODEL = os.environ.get("VLLM_MODEL", "qwen/qwen3-30b-a3b-instruct-2507 ")
 # vLLM ignores the key, but a hosted OpenAI-compatible provider needs a real one.
 # Lets you point the agent at e.g. OpenAI while iterating without a running vLLM.
 LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
