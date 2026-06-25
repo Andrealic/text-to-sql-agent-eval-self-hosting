@@ -15,8 +15,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sqlite3
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -198,7 +201,15 @@ async def main() -> None:
         default=5,
         help="Max agent requests in flight at once (keep low to avoid rate limits / SLO distortion).",
     )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Identifier for this run (default: <UTC timestamp>-<short uuid>). Lets results be tracked/compared.",
+    )
     args = parser.parse_args()
+
+    created_at = datetime.now(timezone.utc).isoformat()
+    run_id = args.run_id or f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
 
     questions = [json.loads(line) for line in args.eval_set.read_text().splitlines() if line.strip()]
     print(f"Loaded {len(questions)} eval questions from {args.eval_set}")
@@ -221,13 +232,23 @@ async def main() -> None:
 
     summary = summarize(results)
     out = {
+        "run_id": run_id,
+        "created_at": created_at,
+        "config": {
+            "eval_set": str(args.eval_set),
+            "agent_url": args.agent_url,
+            "concurrency": args.concurrency,
+            "n_questions": len(questions),
+            "model": os.environ.get("VLLM_MODEL"),
+            "base_url": os.environ.get("VLLM_BASE_URL"),
+        },
         "summary": summary,
         "wall_clock_seconds": elapsed,
         "results": results,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out, indent=2))
-    print(f"Wrote {args.out}")
+    print(f"Wrote {args.out} (run_id={run_id})")
     print(json.dumps(summary, indent=2))
 
 
