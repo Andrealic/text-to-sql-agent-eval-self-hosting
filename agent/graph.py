@@ -16,7 +16,6 @@ conditional router following the same shape.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -29,6 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
 from agent.schema import render_schema
+from agent.sql_utils import extract_sql
 from pydantic import BaseModel, ValidationError
 
 # Total generate + revise calls before the loop is forced to stop.
@@ -80,68 +80,6 @@ def _attach_schema(state: AgentState) -> dict:
     return {"schema": render_schema(state.db_id)}
 
 
-def _split_statements(sql: str) -> list[str]:
-    """Split SQL into its individual statements, ignoring ';' inside quoted strings.
-
-    Returns the non-empty statements, each stripped of surrounding whitespace and
-    the separating ';'. A plain str.split(';') would break a query that legitimately
-    contains ';' inside a literal (e.g. WHERE x = 'a;b'); we only treat a ';' as a
-    separator when it is outside quotes. SQLite escapes quotes by doubling them
-    ('' / ""), which the toggle handles naturally (off then on = unchanged state).
-
-    Kept general (returns every statement) so it can be reused later; this agent
-    only ever runs the first one - see _first_statement.
-    """
-    statements: list[str] = []
-    in_single = in_double = False
-    start = 0
-    for i, ch in enumerate(sql):
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch == ";" and not in_single and not in_double:
-            stmt = sql[start:i].strip()
-            if stmt:
-                statements.append(stmt)
-            start = i + 1
-    tail = sql[start:].strip()
-    if tail:
-        statements.append(tail)
-    return statements
-
-
-def _first_statement(sql: str) -> str:
-    """The first runnable statement, or "" if there is none.
-
-    sqlite refuses to run more than one statement at once ("You can only execute
-    one statement at a time"), and the model sometimes appends a stray ``` fence
-    or prose after the query; we keep only the first statement.
-    """
-    statements = _split_statements(sql)
-    return statements[0] if statements else ""
-
-
-def _extract_sql(text: str) -> str:
-    """Pull a single runnable SQL statement out of an LLM reply.
-
-    Three steps, in order:
-    1. If the reply has a closed ```sql ... ``` block, take what's inside it.
-    2. Otherwise the model left an unclosed/stray fence: drop any line that is
-       just a ``` marker and keep the rest.
-    3. Either way, reduce to the first statement (see _first_statement) so a
-       trailing fence or prose can't trip sqlite's one-statement rule.
-    """
-    fenced = re.search(r"```(?:sql)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if fenced:
-        body = fenced.group(1)
-    else:
-        body = "\n".join(
-            line for line in text.splitlines()
-            if not re.fullmatch(r"\s*```(?:sql)?\s*", line, re.IGNORECASE)
-        )
-    return _first_statement(body.strip())
-
 def _parse_verify_json(text: str) -> tuple[bool, str]:
     fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
     raw = (fenced.group(1) if fenced else text).strip()
@@ -171,7 +109,7 @@ def generate_sql_node(state: AgentState) -> dict:
             question=state.question,
         )),
     ])
-    sql = _extract_sql(response.content)
+    sql = extract_sql(response.content)
     return {
         "sql": sql,
         "iteration": state.iteration + 1,
@@ -237,7 +175,7 @@ def revise_node(state: AgentState) -> dict:
             verify_issue=state.verify_issue,
         )),
     ])
-    revise_result = _extract_sql(response.content)
+    revise_result = extract_sql(response.content)
     return {
     "sql": revise_result,
     "iteration": state.iteration + 1,
