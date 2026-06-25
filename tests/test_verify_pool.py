@@ -1,9 +1,7 @@
-"""Tests for the pooled verifier (3 independent voters, majority vote).
+"""Tests for the verifier node.
 
-The LLM is stubbed with scripted replies (no network). We check the 2-of-3
-majority logic, that a single prose / parse-fail reply can no longer sink a
-correct answer, and that on rejection the issues of the dissenting voters are
-returned to revise.
+The LLM is stubbed with scripted replies (no network). We check JSON parsing,
+ok/reject routing, parse-fail handling, and targeted evidence requests.
 
 Run standalone (no pytest needed):
     uv run python tests/test_verify_pool.py
@@ -22,16 +20,10 @@ from agent.graph import AgentState, verify_node  # noqa: E402
 
 OK = '{"ok": true, "issue": ""}'
 NO = '{"ok": false, "issue": "wrong columns"}'
-NO2 = '{"ok": false, "issue": "zero rows"}'
 NO_EVIDENCE = (
     '{"ok": false, "issue": "literal may use display value instead of stored code", '
     '"needs_evidence": true, '
     '"evidence_questions": ["Check distinct client.gender values", "Count rows by gender"]}'
-)
-NO_EVIDENCE_DUP = (
-    '{"ok": false, "issue": "stored code is unverified", '
-    '"needs_evidence": true, '
-    '"evidence_questions": ["Check distinct client.gender values"]}'
 )
 PROSE = "The query returns **339** male clients in the 'Hl.m. Praha' district."  # parse-fail
 
@@ -60,47 +52,33 @@ def _verify_with(replies: list[str]) -> dict:
         graph.llm = original
 
 
-def test_unanimous_ok_passes():
-    out = _verify_with([OK, OK, OK])
+def test_ok_passes():
+    out = _verify_with([OK])
     assert out["verify_ok"] is True
     assert out["verify_issue"] == "none"
 
 
-def test_majority_ok_passes_2_1():
-    out = _verify_with([OK, NO, OK])
-    assert out["verify_ok"] is True
-
-
-def test_majority_reject_fails_and_returns_both_reasons():
-    out = _verify_with([NO, OK, NO2])
+def test_reject_fails_and_returns_reason():
+    out = _verify_with([NO])
     assert out["verify_ok"] is False
-    # reasons from BOTH rejecting voters are handed to revise
     assert "wrong columns" in out["verify_issue"]
-    assert "zero rows" in out["verify_issue"]
 
 
-def test_single_prose_vote_cannot_sink_correct_answer():
-    """The Praha bug: one natural-language (parse-fail) reply is just 1 'not ok'
-    vote, so 2 proper ok votes still pass."""
-    out = _verify_with([OK, PROSE, OK])
-    assert out["verify_ok"] is True
-
-
-def test_two_parse_fails_reject_with_reason():
-    out = _verify_with([PROSE, PROSE, OK])
+def test_parse_fail_rejects_with_reason():
+    out = _verify_with([PROSE])
     assert out["verify_ok"] is False
     assert "could not parse" in out["verify_issue"]
 
 
 def test_votes_recorded_in_history():
-    out = _verify_with([OK, NO, OK])
+    out = _verify_with([OK])
     entry = out["history"][-1]
     assert entry["node"] == "verify"
-    assert len(entry["votes"]) == 3
+    assert len(entry["votes"]) == 1
 
 
-def test_rejected_votes_can_request_deduped_evidence():
-    out = _verify_with([NO_EVIDENCE, OK, NO_EVIDENCE_DUP])
+def test_rejected_vote_can_request_evidence():
+    out = _verify_with([NO_EVIDENCE])
     assert out["verify_ok"] is False
     assert out["needs_evidence"] is True
     assert out["evidence_questions"] == [

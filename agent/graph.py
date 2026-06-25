@@ -35,10 +35,9 @@ from pydantic import BaseModel, ValidationError
 # 3-5 is a reasonable range; tune it as part of Phase 3.
 MAX_ITERATIONS = 3
 
-# Verify is a pool of independent voters; the answer passes on a majority.
-# Sampled at VERIFY_TEMPERATURE so the voters are not identical. Each voter is
-# one LLM call, so verify costs N_VERIFY_VOTERS calls per iteration.
-N_VERIFY_VOTERS = 3
+# Single verifier call. The 3-voter pool was effectively unanimous on the
+# target Qwen model, so it tripled cost/latency without improving routing.
+N_VERIFY_VOTERS = 1
 VERIFY_TEMPERATURE = 0.4
 
 #VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
@@ -281,7 +280,7 @@ def verify_node(state: AgentState) -> dict:
         needs_evidence = bool(evidence_questions)
 
     print(
-        f"verify pool: {n_ok}/{N_VERIFY_VOTERS} ok -> verify_ok={verify_ok} "
+        f"verify: {n_ok}/{N_VERIFY_VOTERS} ok -> verify_ok={verify_ok} "
         f"needs_evidence={needs_evidence}"
     )
     return {
