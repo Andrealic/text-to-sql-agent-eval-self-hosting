@@ -32,5 +32,4 @@ evals/eval_set.jsonl
 *.pdf
 
 ultraplan.md
-evals/*
 docs/

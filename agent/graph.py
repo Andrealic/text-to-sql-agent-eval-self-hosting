@@ -122,7 +122,7 @@ def _parse_verify_json(text: str) -> VerifyResult:
 # Bounds for the explore step: keep the LLM-proposed exploration cheap and its
 # output small enough to fit the revise prompt.
 MAX_EXPLORE_QUERIES = 6
-MAX_EVIDENCE_QUERIES = 4
+MAX_EVIDENCE_QUERIES = 6
 MAX_EVIDENCE_BLOCKS = 10
 EXPLORE_MAX_ROWS = 15
 EXPLORE_MAX_CELL = 80
@@ -227,14 +227,10 @@ def execute_node(state: AgentState) -> dict:
 
 
 def verify_node(state: AgentState) -> dict:
-    """Pooled verification: N independent voters decide if the answer is plausible.
+    """Verify whether the executed SQL answers the question.
 
-    Each voter is one LLM call (sampled at VERIFY_TEMPERATURE so they are not
-    identical) returning {"ok": bool, "issue": str}, parsed defensively. The
-    answer passes on a majority of ok votes (e.g. 2 of 3). A single voter that
-    replies in prose / fails to parse counts as one "not ok" vote, so it can no
-    longer sink a correct answer on its own. When it does not pass, we hand the
-    revise step the reasons from every voter that rejected it.
+    The verifier returns JSON with ok/issue plus optional targeted evidence
+    questions. Evidence requests route through evidence_node before revise.
     """
     messages = [
         ("system", prompts.VERIFY_SYSTEM),
