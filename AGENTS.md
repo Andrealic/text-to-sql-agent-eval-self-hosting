@@ -97,3 +97,11 @@ UI (via port-forward SSH): Grafana `:3000` (admin/admin) · Prometheus `:9090` �
   nel README.
 - `README.md` è la fonte di verità sulla consegna: in caso di dubbio su cosa fare in una fase,
   consultarlo prima di assumere.
+- **Eval ad ogni giro:** dopo ogni modifica all'agente invoca la skill **`sql-agent-eval`**
+  (`.claude/skills/sql-agent-eval/SKILL.md`). Misura due metriche totali — accuracy BIRD (stretta,
+  programmatica) e una metrica **lasca 0/0.5/1** via LLM-judge (giudice ≠ agente) — più una valutazione
+  **per-nodo dinamica** (explore/generate/verify/evidence/revise, con fallback per nodi nuovi) e un
+  commento testo libero sul perché ogni domanda fallisce. Pipeline:
+  `run_eval.py → extract_traces.py (da Langfuse) → judge (Claude o evals/judge_run.py) → analyze_run.py`,
+  con report in `docs/eval-report_<run_id>.md`. Il `/answer` NON espone gli step intermedi: i dati
+  per-nodo vengono da Langfuse.

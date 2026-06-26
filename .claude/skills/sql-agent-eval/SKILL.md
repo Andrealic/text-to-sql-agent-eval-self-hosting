@@ -1,66 +1,95 @@
 ---
 name: sql-agent-eval
-description: Run and report a text-to-SQL agent eval against the BIRD gold set. Use when asked to "run the eval", test the agent on N questions / all 30, compare to gold, analyze FP/FN/TP/TN of the verifier, check node health (explore/verify/evidence/revise), or produce an eval report. Wraps evals/run_eval.py + evals/analyze_run.py and writes docs/eval-report_<run_id>.md.
+description: Evaluate and report on the text-to-SQL agent each implementation cycle. Use when asked to "run the eval", test the agent on N / all 30 BIRD questions, measure if we improved, judge node-level behaviour (explore/generate/verify/evidence/revise), score the lenient chatbot metric, explain why a question fails, or produce an eval report. Two total metrics: strict BIRD execution accuracy + a lenient 0/0.5/1 LLM-judge. Wraps run_eval.py → extract_traces.py → judge → analyze_run.py and writes docs/eval-report_<run_id>.md.
 ---
 
-# SQL agent eval + report
+# SQL agent eval + report (run at the end of every agent change)
 
-Repeatable workflow to evaluate the LangGraph text-to-SQL agent against the BIRD gold set and
-write a structured report. Everything is scored vs gold by **executed row sets** (canonicalized);
-node behaviour comes from **Langfuse** traces.
+Repeatable framework to answer "did this change improve the agent?" at the **total** and **per-node**
+level. Two total metrics live side by side:
+- **BIRD execution accuracy** — strict, programmatic (executed row sets vs gold). From `run_eval.py`.
+- **Lenient score 0 / 0.5 / 1** — LLM-judge, computed a posteriori: "would this do as a chatbot reply
+  vs gold", tolerant of extra columns / non-exhaustive rows. **Judge ≠ agent** (use a stronger, different model).
+
+Per-node assessment is **dynamic**: it judges whatever nodes appear in the trace (role rubric below +
+generic fallback), so it survives architecture changes. Node data comes from **Langfuse** (the `/answer`
+API intentionally does not expose intermediate reasoning).
 
 ## 0. Preconditions
-- Agent server running on `:8001` (the user starts it: `uv run uvicorn agent.server:app --host 0.0.0.0 --port 8001`). Check: `curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health` → 200. If it's not the current code, ask the user to restart (uvicorn does not auto-reload).
-- **Model matters:** off-GPU use a fast **non-reasoning instruct** model (e.g. `qwen/qwen3-30b-a3b-instruct-2507` via OpenRouter in `.env`). A reasoning model (e.g. minimax) makes calls slow and causes hangs — the agent makes 5-13 LLM calls/question. Real SLO/pass-rate numbers must come from `Qwen3-30B-A3B` on the H100.
-- BIRD DBs present under `data/bird/`.
+- Agent server on `:8001` running the **current** code (uvicorn does not auto-reload — if the user just
+  changed the agent, ask them to restart). Check `curl -s -o /dev/null -w "%{http_code}" :8001/health`.
+- Off-GPU model = a fast **non-reasoning instruct** (e.g. `qwen/qwen3-30b-a3b-instruct-2507` in `.env`).
+- Langfuse up (for trace extraction); BIRD DBs under `data/bird/`.
 
-## 1. Pick the question set
-- Full set: `evals/eval_set.jsonl` (30 questions).
-- A slice: `sed -n '11,20p' evals/eval_set.jsonl > evals/eval_set_10b.jsonl` (questions 11-20), etc.
+## 1. Pick the set & smoke-probe
+`evals/eval_set.jsonl` = 30 questions; a slice e.g. `sed -n '11,20p' evals/eval_set.jsonl > evals/eval_set_10b.jsonl`.
+Probe one question first and check `history` shows the expected node flow before a full run.
 
-## 2. Smoke-probe one question first
-Confirm the server runs the current graph and the flow is healthy before a full run:
+## 2. Run the eval (strict metric + capture)
+Always pass a descriptive `--run-id` (results saved to `results/eval_<run_id>.json`, never overwriting):
 ```
-curl -s -m 250 -X POST http://localhost:8001/answer -H "Content-Type: application/json" \
-  -d '{"question":"...","db":"..."}' | python3 -m json.tool
+uv run python evals/run_eval.py --eval-set evals/eval_set.jsonl --concurrency 1 --timeout 300 --run-id <id>
 ```
-Check the `history` shows the expected node flow (explore → generate_sql → verify → [evidence → revise → ...]).
+Long runs: launch in background, poll for `[n/N]` / `Wrote`.
 
-## 3. Run the eval
-Always pass a meaningful `--run-id` so results never overwrite (saved to `results/eval_<run_id>.json`,
-which records run_id / created_at / config / model). Concurrency 1 keeps it clean; raise `--timeout`
-for slow backends. Long runs: launch in the background and poll the output for `[n/N]` / `Wrote`.
+## 3. Extract per-node traces from Langfuse
 ```
-uv run python evals/run_eval.py --eval-set evals/eval_set.jsonl \
-  --concurrency 1 --timeout 300 --run-id <descriptive-id>
+uv run python evals/extract_traces.py results/eval_<id>.json   # -> results/eval_<id>.traces.json
 ```
 
-## 4. Analyze vs gold + node health
+## 4. Judge (lenient metric + per-node + free-text)  →  results/eval_<id>.judged.json
+**Primary path — Claude-as-judge (you, when running this skill).** For each question read: the question,
+gold SQL + executed gold rows, the agent's final SQL + executed rows, `final_correct`, whether any step
+was gold-correct (`per_iteration[*].correct`), and the node `steps` from the traces file. Emit one record
+per question into `results/eval_<id>.judged.json` with this exact schema:
 ```
-uv run python evals/analyze_run.py results/eval_<run_id>.json --langfuse
+{ "run_id": "<id>", "judge_model": "claude-code", "results": [
+  { "question", "db_id", "bird_correct": bool,
+    "lenient_score": 0 | 0.5 | 1,
+    "failure_reason": "1-2 sentences on what it misunderstood (\"\" if score==1)",
+    "nodes": {
+      "explore":  {"verdict":"good|partial|poor|na","suggested_right_queries":bool,"note":""},
+      "generate": {"correct_at_some_step":bool,"error_despite_context":bool,"ignored_info":"","note":""},
+      "revise":   {"helpful":"improved|neutral|worse|na","used_evidence":bool,"note":""},
+      "verify":   {"verdict_justified":bool,"note":""},
+      "<any other node present>": {"did_its_job":bool,"note":""}   // generic => dynamic
+    } } ] }
 ```
-This prints: overall + per-iteration pass rate; **verifier confusion matrix vs gold (TP/TN/FP/FN)**;
-what revise did (fixed x→C, broke C→x, regressions); per-DB breakdown; the failure list with
-correctness/verify sequences; and per-node health (explore avg queries + UPPER usage, verify
-parse-fails + vote distribution, evidence invocations, revise calls, execute errors).
+Lenient scoring: **1** = same answer for a user (cosmetic diffs/extra cols ok); **0.5** = partially
+acceptable (non-exhaustive, extra/missing rows, slightly off granularity); **0** = wrong entity/number/empty.
+Node rubric (be concrete in `note`): explore = did its queries target the columns/values the question
+needs? generate/revise = did any step produce a gold-correct query (even if verify rejected it)? did it
+err **despite** findings/evidence in context that contained the right fact (name it in `ignored_info`)?
+revise = did it improve and use the gathered evidence? verify = was accept/reject justified vs gold?
 
-## 5. Write the report
-Save to `docs/eval-report_<run_id>.md`, referencing the run_id. Structure (see existing reports
-in `docs/` for the template):
-1. **Header** — run_id, model, set, config, wall clock, errors.
-2. **Result vs gold** — overall + per-iteration (does the loop earn its keep? iter0 → final).
-3. **Failure taxonomy** — group fails: domain-knowledge gaps (missing BIRD `evidence`),
-   verifier false-positives (accepted wrong), interpretation/shape, output-format/label.
-4. **Node-by-node** — for explore / generate / execute / verify / evidence / revise / router:
-   is it doing its job, and well? Give the verifier confusion matrix and the role of evidence + revise.
-5. **Verdict & prioritized levers** — be honest if the machinery isn't beating a prior baseline;
-   compare run-to-run (results files are kept per run_id).
+**Headless path — script** (for CI / no Claude session). Judge model defaults to a strong model ≠ agent
+(`anthropic/claude-sonnet-4.5` via the OpenRouter key; override `--model` / `JUDGE_MODEL`):
+```
+uv run python evals/judge_run.py results/eval_<id>.json            # all questions
+uv run python evals/judge_run.py results/eval_<id>.json --limit 5  # smoke subset
+```
 
-## Key things to look for (learned)
-- **Verifier FP is usually the ceiling**: it accepts plausible-but-wrong answers, ending the loop
-  before revise can help. FN (rejecting correct) wastes iterations / passes become luck.
-- **`could not parse` verify outputs** = the model answered in prose, not JSON (reinforce VERIFY_SYSTEM).
-- **Latency/hangs** are LLM-side, never the DB (sub-ms). A reasoning model + many calls/question is
-  the usual cause; `request_timeout` on `llm()` is in **milliseconds** in langchain_openrouter.
-- **~1/3 of BIRD fails need external `evidence`** (clinical ranges, status-code semantics, label
-  encodings) that the data alone can't reveal — a hard ceiling for the explorer.
+## 5. Aggregate both metrics + node verdicts
+```
+uv run python evals/analyze_run.py results/eval_<id>.json --langfuse --judged
+```
+Prints: BIRD overall + per-iteration (does the loop earn its keep, iter0→final); verifier confusion
+matrix vs gold (TP/TN/FP/FN); revise fixed/broke/regressions; per-DB; failure list; Langfuse node-health
+(explore queries+UPPER, verify parse-fails+votes, evidence/revise calls, execute errors); and the
+**lenient mean + distribution** plus **per-node judge aggregates** + per-question failure reasons.
+
+## 6. Write the report
+`docs/eval-report_<run_id>.md` (see existing reports as template). Sections: header (run_id, model,
+config); **two headline metrics** (BIRD + lenient); loop value (iter0→final); failure taxonomy
+(domain-knowledge gap / verifier FP / interpretation / output-format); **node-by-node** (is each doing its
+job, with the judge verdicts + the deterministic confusion matrix + the evidence/revise roles); honest
+run-to-run comparison; prioritized next levers.
+
+## Recurring lessons (what to look for)
+- **Verifier FP is usually the ceiling** (accepts plausible-but-wrong → loop stops). FN wastes iterations.
+- **Domain-knowledge cluster (~1/3 of BIRD fails)** needs external `evidence` (clinical ranges, status
+  codes, label encodings) absent from the data — a hard ceiling; the evidence node helps only with
+  data-derivable facts.
+- **Latency/hangs are LLM-side**, never the DB. A reasoning model + many calls/question causes timeouts.
+- Keep the per-node rubric in step 4 in sync if you add/rename nodes; the framework still scores unknown
+  nodes via the generic fallback.
