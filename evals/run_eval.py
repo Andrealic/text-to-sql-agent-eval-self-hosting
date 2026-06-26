@@ -23,11 +23,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
+
+# Load .env so the run records the same VLLM_MODEL/base_url the agent serves (provenance only;
+# the agent itself reads env server-side). Harmless if .env is absent.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EVAL_FILE = ROOT / "evals" / "eval_set.jsonl"
 DB_DIR = ROOT / "data" / "bird"
 AGENT_URL_DEFAULT = "http://localhost:8001/answer"
+
+
+def _resolve_agent_version() -> str:
+    try:
+        from agent import AGENT_VERSION  # local import: avoid hard dep at module load
+        return AGENT_VERSION
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _git_info() -> tuple[str | None, bool]:
+    """Return (short SHA, dirty?) of the working tree, or (None, False) if unavailable."""
+    import subprocess
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=5).stdout.strip() or None
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                                    capture_output=True, text=True, timeout=5).stdout.strip())
+        return sha, dirty
+    except Exception:  # noqa: BLE001
+        return None, False
 
 
 # ---------- Helpers (provided) -----------------------------------------
@@ -216,10 +242,17 @@ async def main() -> None:
         default=120.0,
         help="Per-request timeout (s) for the agent HTTP call. Raise it when a slow backend needs more time per run.",
     )
+    parser.add_argument(
+        "--agent-version",
+        default=None,
+        help="Agent version stamped on the run (default: agent.AGENT_VERSION). Historicizes results.",
+    )
     args = parser.parse_args()
 
     created_at = datetime.now(timezone.utc).isoformat()
     run_id = args.run_id or f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+    agent_version = args.agent_version or _resolve_agent_version()
+    git_sha, git_dirty = _git_info()
     out_path = args.out or (ROOT / "results" / f"eval_{run_id}.json")
 
     questions = [json.loads(line) for line in args.eval_set.read_text().splitlines() if line.strip()]
@@ -245,6 +278,9 @@ async def main() -> None:
     out = {
         "run_id": run_id,
         "created_at": created_at,
+        "agent_version": agent_version,
+        "git_sha": git_sha,
+        "git_dirty": git_dirty,
         "config": {
             "eval_set": str(args.eval_set),
             "agent_url": args.agent_url,

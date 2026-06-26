@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+from agent import AGENT_VERSION  # noqa: E402
 from agent.graph import AgentState, graph  # noqa: E402
 
 # Use uvicorn's configured logger so request summaries show up with the server logs.
@@ -77,7 +78,7 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     started = time.perf_counter()
     state = AgentState(question=req.question, db_id=req.db)
     DEFAULT_TAGS = {
-        "agent_version": "v0.2.0"
+        "agent_version": AGENT_VERSION
     }
     metadata = {**DEFAULT_TAGS, **req.tags}
     logger.info(

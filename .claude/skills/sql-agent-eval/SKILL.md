@@ -26,11 +26,14 @@ API intentionally does not expose intermediate reasoning).
 Probe one question first and check `history` shows the expected node flow before a full run.
 
 ## 2. Run the eval (strict metric + capture)
-Always pass a descriptive `--run-id` (results saved to `results/eval_<run_id>.json`, never overwriting):
+First, if the agent changed, **bump `AGENT_VERSION` in `agent/__init__.py`** (single source; `server.py`
+imports it). Then run — always pass a descriptive `--run-id` (results saved to `results/eval_<run_id>.json`,
+never overwriting):
 ```
 uv run python evals/run_eval.py --eval-set evals/eval_set.jsonl --concurrency 1 --timeout 300 --run-id <id>
 ```
-Long runs: launch in background, poll for `[n/N]` / `Wrote`.
+The results JSON is **historicized**: it records `agent_version` (from code), `git_sha` + `git_dirty`,
+`model`/`base_url` (from `.env`), and `created_at` (UTC). Long runs: launch in background, poll for `[n/N]`.
 
 ## 3. Extract per-node traces from Langfuse
 ```
@@ -78,9 +81,17 @@ matrix vs gold (TP/TN/FP/FN); revise fixed/broke/regressions; per-DB; failure li
 (explore queries+UPPER, verify parse-fails+votes, evidence/revise calls, execute errors); and the
 **lenient mean + distribution** plus **per-node judge aggregates** + per-question failure reasons.
 
-## 6. Write the report
-`docs/eval-report_<run_id>.md` (see existing reports as template). Sections: header (run_id, model,
-config); **two headline metrics** (BIRD + lenient); loop value (iter0→final); failure taxonomy
+## 6. Update the history index
+Append/refresh this run's row in `docs/eval-history.md` (idempotent by run_id, newest first):
+```
+uv run python evals/update_history.py results/eval_<id>.json
+```
+This is the across-cycles view: created (UTC) · agent_version · git · run_id · model · strict · iter0→final · lenient · n.
+
+## 7. Write the report
+`docs/eval-report_<run_id>.md` (see existing reports as template). Sections: header (run_id, **agent_version,
+git_sha(+dirty), model, created_at (UTC)**, config); **two headline metrics** (BIRD + lenient); loop value
+(iter0→final); failure taxonomy
 (domain-knowledge gap / verifier FP / interpretation / output-format); **node-by-node** (is each doing its
 job, with the judge verdicts + the deterministic confusion matrix + the evidence/revise roles); honest
 run-to-run comparison; prioritized next levers.

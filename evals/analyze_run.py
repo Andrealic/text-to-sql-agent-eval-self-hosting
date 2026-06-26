@@ -38,9 +38,11 @@ def _bool(v) -> bool | None:
 def analyze_gold(d: dict) -> None:
     s = d["summary"]
     c = d.get("config", {})
+    git = d.get("git_sha") or "?"
+    git += "-dirty" if d.get("git_dirty") else ""
     print("=" * 70)
-    print(f"RUN {d.get('run_id')}  |  model: {c.get('model') or '(env default)'}")
-    print(f"created: {d.get('created_at')}  wall: {round(d.get('wall_clock_seconds', 0))}s")
+    print(f"RUN {d.get('run_id')}  |  agent {d.get('agent_version') or '?'}  |  git {git}")
+    print(f"model: {c.get('model') or '(env default)'}  |  created: {d.get('created_at')}  |  wall: {round(d.get('wall_clock_seconds', 0))}s")
     print("=" * 70)
     print(f"overall_pass_rate      = {s['overall_pass_rate']}")
     print(f"per_iteration_pass_rate= {[round(x, 3) for x in s['per_iteration_pass_rate']]}")
