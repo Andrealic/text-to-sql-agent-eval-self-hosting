@@ -18,7 +18,7 @@ HISTORY = ROOT / "docs" / "eval-history.md"
 HEADER = (
     "# Eval history\n\n"
     "One row per eval run, newest first. Strict = BIRD execution accuracy; "
-    "Lenient = LLM-judge 0/0.5/1 mean. Per-run detail in `docs/eval-report_<run_id>.md`.\n\n"
+    "Lenient = LLM-judge 0/0.5/1 mean. Per-run detail in `docs/eval-report_<timestamp>_<agent_version>_<run_id>.md`.\n\n"
     "| created (UTC) | agent | git | run_id | model | strict | iter0→final | lenient | n |\n"
     "|---|---|---|---|---|---|---|---|---|\n"
 )

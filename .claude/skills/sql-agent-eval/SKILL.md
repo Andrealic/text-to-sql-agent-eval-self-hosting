@@ -89,7 +89,9 @@ uv run python evals/update_history.py results/eval_<id>.json
 This is the across-cycles view: created (UTC) · agent_version · git · run_id · model · strict · iter0→final · lenient · n.
 
 ## 7. Write the report
-`docs/eval-report_<run_id>.md` (see existing reports as template). Sections: header (run_id, **agent_version,
+Filename convention (historicized): **`docs/eval-report_<YYYYMMDD-HHMMSS>_<agent_version>_<run_id>.md`**
+(timestamp from `created_at`, `agent_version` from the run; for past runs not stamped in the JSON, read it
+from the Langfuse trace `metadata.agent_version`). Sections: header (run_id, **agent_version,
 git_sha(+dirty), model, created_at (UTC)**, config); **two headline metrics** (BIRD + lenient); loop value
 (iter0→final); failure taxonomy
 (domain-knowledge gap / verifier FP / interpretation / output-format); **node-by-node** (is each doing its
