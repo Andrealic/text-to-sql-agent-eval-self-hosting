@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
 
 from langgraph.graph import END, START, StateGraph
 
@@ -40,12 +40,12 @@ MAX_ITERATIONS = 3
 N_VERIFY_VOTERS = 1
 VERIFY_TEMPERATURE = 0.4
 
-#VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-#VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "https://openrouter.ai/api/v1")
-VLLM_MODEL = os.environ.get("VLLM_MODEL", "qwen/qwen3-30b-a3b-instruct-2507 ")
+# Self-hosted by default: the agent talks to our own vLLM serving the real
+# Qwen3-30B-A3B on the H100. Override via .env to point at a hosted backend
+# while iterating without a running vLLM.
+VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 # vLLM ignores the key, but a hosted OpenAI-compatible provider needs a real one.
-# Lets you point the agent at e.g. OpenAI while iterating without a running vLLM.
 LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
 
 class VerifyResult(BaseModel):
@@ -81,22 +81,22 @@ LLM_REQUEST_TIMEOUT = float(os.environ.get("LLM_REQUEST_TIMEOUT", "60"))
 LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "2"))
 
 
-def llm(temperature: float = 0.0) -> ChatOpenRouter:
-    """Chat client pointed at VLLM_BASE_URL (your local vLLM by default).
+def llm(temperature: float = 0.0) -> ChatOpenAI:
+    """Chat client pointed at VLLM_BASE_URL (our self-hosted vLLM by default).
 
     temperature is a parameter so the verify pooling can sample independent
     voters (temperature > 0) while the other nodes stay deterministic (0.0).
 
-    request_timeout + max_retries bound each LLM call: a stalled upstream
-    request fails fast and retries instead of hanging the whole graph run.
+    timeout + max_retries bound each LLM call: a stalled upstream request fails
+    fast and retries instead of hanging the whole graph run.
     """
-    return ChatOpenRouter(
+    return ChatOpenAI(
         model=VLLM_MODEL,
         base_url=VLLM_BASE_URL,
         api_key=LLM_API_KEY,
         temperature=temperature,
-        # ChatOpenRouter's request_timeout is in MILLISECONDS (maps to SDK timeout_ms).
-        request_timeout=int(LLM_REQUEST_TIMEOUT * 1000),
+        # ChatOpenAI's timeout is in SECONDS (unlike ChatOpenRouter, which used ms).
+        timeout=LLM_REQUEST_TIMEOUT,
         max_retries=LLM_MAX_RETRIES,
     )
 

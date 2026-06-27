@@ -45,7 +45,7 @@ def _step_from_obs(o: dict) -> dict | None:
     out = o.get("output") if isinstance(o.get("output"), dict) else {}
     if name not in ("explore", "generate_sql", "execute", "verify", "evidence", "revise"):
         # Unknown / future node: capture generically so the judge can still see it.
-        if name in ("attach_schema", "route_after_verify", "ChatOpenRouter", "LangGraph"):
+        if name in ("attach_schema", "route_after_verify", "ChatOpenAI", "ChatOpenRouter", "LangGraph"):
             return None
         return {"node": name, "output": out}
 
