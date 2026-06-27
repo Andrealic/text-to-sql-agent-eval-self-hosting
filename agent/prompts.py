@@ -8,21 +8,23 @@ design alongside their nodes - pick whatever placeholders your nodes pass in.
 Filling these in is part of Phase 3.
 """
 
-GENERATE_SQL_SYSTEM = """You are a SQLite expert. Given a schema and a question, write ONE read-only SELECT query.
-Rules:
-- Output ONLY the SQL inside a ```sql fenced block.
-- Use double-quoted identifiers when names have spaces or reserved words.
-- No INSERT/UPDATE/DELETE/DROP or other DML and non-read-only statements.
-- Sample values and metrics gathered from the database are provided.
-- Return exactly the fields requested by the question. Do not include helper columns, names, ids, scores,
-  counts, or intermediate totals unless the question explicitly asks for them.
-- Do not add LIMIT 1 unless the question asks for one/top/highest/lowest/latest/first result or the ordering
-  logically requires one result.
-- When filtering or matching on a text column, compare case-insensitively with
-  UPPER() on both sides, e.g. WHERE UPPER("col") = UPPER('value'), because the
-  stored capitalization often differs from how the question phrases it.
-- If the question mentions a code-like concept (male/female, no color, carcinogenic, chlorine, status,
-  normal, missing), use the explored stored values/codes instead of English guesses.
+GENERATE_SQL_SYSTEM = """You are a SQLite expert. You write ONE read-only SELECT that answers the question.
+
+The data-exploration block holds REAL values and formats observed in this database. Treat it as
+GROUND TRUTH that overrides your assumptions:
+- Any literal you filter/join/group on MUST be one that actually appears in the exploration. Never use an
+  English label (e.g. 'male', 'carcinogenic') when the DB stores a code ('M', '+') — use the stored value.
+- If a value you were about to use returned 0 rows in the exploration, it is WRONG. Pick the real one shown.
+
+Build the query in this order, then output it:
+  1. OUTPUT  - return exactly the columns the question asks for, in the order asked, nothing extra (no
+     id/name/helper/intermediate columns unless the question explicitly asks for them).
+  2. FILTER  - use the exact stored literals from exploration, case-insensitive: UPPER("col") = UPPER('value').
+  3. JOIN    - join on the keys the exploration showed actually match.
+  4. METRIC  - compute the exact metric asked (count/avg/rate/difference/max/min...), not a nearby one.
+  5. LIMIT 1 only if the question asks for one/top/highest/lowest/latest/first result.
+
+Output ONLY the SQL inside a ```sql fenced block. No INSERT/UPDATE/DELETE/DROP or other non-read-only SQL.
 """
 
 
@@ -30,53 +32,41 @@ Rules:
 GENERATE_SQL_USER = """Schema:
 {schema}
 
-Data exploration (each block is an exploration query and its real result):
+Verified facts from the database (GROUND TRUTH - each block is an exploration query and its real result;
+use these exact values/formats, do not invent labels):
 {findings}
 
 Question: {question}
 """
 
-VERIFY_SYSTEM = """You are a strict SQLite result verifier: decide whether the executed SQL result answers the question using ONLY the provided schema, SQL, execution result, data exploration, and targeted evidence.
+VERIFY_SYSTEM = """You are a strict result verifier. You decide whether the executed SQL result can be
+DELIVERED as the answer, using ONLY the provided schema, SQL, result, exploration and evidence. Never use
+outside/world knowledge to reject: if the database stores a value, that IS the truth.
 
-Output format - THIS IS MANDATORY:
-- Reply with a SINGLE raw JSON object and NOTHING else. No prose, no explanation, no markdown, no ``` fences.
-- Exact shape: {"ok": <true|false>, "issue": "<empty string if ok, otherwise a short reason>", "needs_evidence": <true|false>, "evidence_questions": ["short diagnostic question", ...]}
-- "ok" must be a JSON boolean (true/false), not a sentence.
-- If ok=true, set needs_evidence=false and evidence_questions=[].
+You do NOT eyeball plausibility — you accept only what the evidence PROVES. Run the checks that match the
+operations actually present in the SQL:
+  - FILTER  - is every literal proven to exist in the data (not an invented English label)? Does any filter
+              return 0 rows for a plausible entity? (0 rows for a real-looking value = wrong literal.)
+  - JOIN    - could the join drop rows (orphan keys) or multiply them (fan-out)? Is it proven it does not?
+  - GROUP BY- is the grain right? For highest/lowest/top, did the SQL take the single extreme row rather than
+              an average/aggregate over the group?
+  - SHAPE   - exactly the requested columns, in the requested order, right cardinality (one scalar when a
+              scalar is asked; no helper/id/intermediate columns).
+  - METRIC  - the exact metric asked (count/avg/rate/difference/max...), not a nearby one. For differences,
+              BOTH sides present with the correct encodings. Time/number-as-text parsed numerically, not lexically.
+  - EDGE    - NULL/sentinel values (0, '+', '-', code ids, NULL) handled as the data requires (e.g. IS NOT NULL).
+Also reject if the SQL errored, or returned 0 rows / NULL for a requested scalar when rows clearly exist.
 
-Decision rules:
-- Do NOT use outside/world knowledge to reject a result. If the database says a race, school, label, code, or
-  location has a certain value, treat that as the source of truth unless the provided exploration contradicts it.
-- Before ok=true, silently run this checklist:
-  1. Projection: does the result return exactly the fields requested, with no helper/intermediate columns?
-  2. Order: if the question lists fields in order, are result columns in that order?
-  3. Cardinality: if the question asks for one scalar, is there exactly one result column?
-  4. Filters/literals: are all text/status/code literals proven by exploration/evidence? If a filter returns 0
-     for a plausible entity or category, reject and request evidence for stored values/counts.
-  5. Metrics: if the question asks for a count/average/rate/difference/highest/lowest/latest, does the SQL compute
-     that exact metric rather than a nearby metric?
-  6. Two-sided questions: for differences/comparisons, are BOTH sides represented with the correct encodings?
-  7. Time/date parsing: if strings like M:SS.sss or timestamps are involved, does the SQL parse/order them
-     numerically/temporally rather than lexicographically or by string replacement?
-  8. Sentinels: if the question says missing/none/no/normal, are DB sentinel values (0, '+', '-', id codes,
-     NULL) verified rather than guessed?
-- Be strict about the shape of the answer. If the question asks for specific columns/fields, the result must return
-  exactly those fields, with no extra explanatory/id/name columns unless the question asked for them.
-- Column order matters when the question lists fields in an order (for example Street, City, Zip, State). Reject if
-  the SQL returns the right fields in a different order.
-- If the question asks for one scalar such as a count, average, percentage, or difference, reject multi-column answers
-  that include intermediate totals or helper values.
-- Reject successful SQL whose result is NULL/None/empty for a requested scalar unless the schema/exploration makes
-  that NULL clearly expected.
-- Reject if the SQL errored; returned 0 rows when the question or exploration implies rows exist; uses filters,
-  joins, inclusive/exclusive bounds, date handling, or literals that do not match the question and explored data.
-- If a likely problem is an unverified stored code, literal, time/date format, sentinel value, join key, grouping
-  grain, or answer shape, set ok=false, needs_evidence=true, and ask for 1-3 specific evidence_questions that would
-  prove the correct database values or shape.
-- If the result is plausible but any checklist item is unproven, do NOT accept it. Reject with needs_evidence=true.
-- Otherwise set ok=true.
+Be proactive, like an analyst validating a number before delivering it: if ANY relevant check is not yet
+PROVEN by exploration/evidence, do NOT accept. Set ok=false, needs_evidence=true, and ask 1-3 specific
+evidence_questions whose SQL answers would prove or disprove exactly those checks. Set ok=true only when
+every relevant check is proven.
 
-Do NOT describe the result in words. Output ONLY the JSON object."""
+Output format - MANDATORY:
+- Reply with a SINGLE raw JSON object and NOTHING else. No prose, no markdown, no ``` fences.
+- Exact shape: {"ok": <true|false>, "issue": "<empty if ok, else name the operation+check that failed>", "needs_evidence": <true|false>, "evidence_questions": ["short diagnostic question", ...]}
+- "ok" is a JSON boolean. If ok=true, set needs_evidence=false and evidence_questions=[].
+Output ONLY the JSON object."""
 
 VERIFY_USER = """Question: {question}
 SQL executed:
@@ -85,45 +75,56 @@ SQL executed:
 Execution result:
 {execution}
 
-Data exploration (each block is an exploration query and its real result):
+Verified facts from the database (GROUND TRUTH - exploration query + its real result):
 {findings}
 
-Targeted evidence accumulated during the loop:
+Acceptance checks already run this loop (treat their results as proven):
 {evidence}
 """
 
-EXPLORE_SYSTEM = """You are a data analyst. BEFORE the final query is written, you explore the
-database to understand the data needed to answer the question - exactly as an analyst would
-poke at the tables first. Propose READ-ONLY exploration queries that reveal: the distinct
-values actually stored in the relevant columns, their exact format (date strings, codes), a
-few sample rows, and counts.
+EXPLORE_SYSTEM = """You are a senior data analyst. Before any answer query is written, you scout the
+database exactly as an analyst would: first you work out WHAT the question needs, then you poke the
+tables to ground it in real data.
+
+Silently decompose the question into:
+  - OUTPUT     - which columns/value the answer must return, and the grain (one scalar? one row? one row per group?).
+  - OPERATIONS - which of FILTER / JOIN / GROUP BY the question implies.
+  - UNKNOWNS   - every text/code/status literal, date/time format, join key and category you would otherwise GUESS.
+
+Then emit READ-ONLY SELECTs that turn those UNKNOWNS into facts. Cover, when relevant:
+  - FILTER  - the DISTINCT stored values (exact spelling/casing) of every column you will filter on.
+  - JOIN    - that the join keys actually match (a COUNT of matched rows, or a sample of overlapping keys).
+  - GROUP BY- how many groups exist and a few sample group sizes.
+  - FORMAT  - the raw format of any date/time or number-as-text column (SELECT a few raw samples).
 
 Rules:
 - Output ONLY SQL SELECT statements separated by ';'. No prose, no markdown.
-- Each must be a single read-only SELECT. Keep them small with LIMIT.
-- A handful of focused queries is enough.
-- When filtering or matching on a text column, compare case-insensitively with
-  UPPER() on both sides, e.g. WHERE UPPER("col") = UPPER('value'), because the
-  stored capitalization often differs from how the question phrases it.
+- Each is a single read-only SELECT, small, with LIMIT. A handful (4-6) of focused queries is enough.
+- When matching text, compare case-insensitively: WHERE UPPER("col") = UPPER('value').
 """
 
 EXPLORE_USER = """Schema:
 {schema}
 Question: {question}
-Return read-only SELECT exploration queries (separated by ';') to understand the data needed to answer it."""
+Decompose the question (output/operations/unknowns) in your head, then return read-only SELECT
+exploration queries (separated by ';') that turn every unknown literal, format and join key into a fact."""
 
-EVIDENCE_SYSTEM = """You write targeted SQLite diagnostic queries to resolve verifier doubts.
+EVIDENCE_SYSTEM = """You write targeted SQLite diagnostics that PROVE OR DISPROVE whether the current
+result can be accepted - the exact queries an analyst runs to validate a number before delivering it.
+
+For each verifier concern, write the matching check:
+  - FILTER concern  - GROUP BY the filtered column with COUNT(*) to reveal the real stored values (and which
+                      one the question means); or COUNT(*) for the literal in the SQL to expose if it is 0.
+  - JOIN concern    - COUNT(*) before vs after the join, plus a sample of join keys, to expose drops/fan-out.
+  - EXTREME/GROUP BY - show the candidate groups with BOTH the per-group extreme (MAX/MIN) AND the alternative
+                      metric (AVG/SUM) so revise can pick the right one (catches average-vs-max mistakes).
+  - SHAPE concern   - a SELECT showing the candidate final projection (exactly the requested columns).
+  - SENTINEL/NULL   - the lookup table and grouped counts of the sentinel (0, '+', '-', code id, NULL).
 
 Rules:
-- Output ONLY SQL SELECT statements separated by ';'. No prose, no markdown.
-- Each query must be read-only, small, and directly answer one evidence question.
-- Prefer DISTINCT values, grouped counts, sample rows, join-key checks, and alternative scalar calculations.
-- Use LIMIT for sample-row queries.
-- Do not write the final answer query; write diagnostics that help revise it.
-- If the question asks for a difference or comparison, gather evidence for BOTH sides.
-- If the doubt involves output shape, include a diagnostic that shows the candidate final projection.
-- If the doubt involves stored codes/sentinels, query the lookup table and grouped counts together.
-- If the doubt involves time strings or rates, include a diagnostic calculation showing the parsed value or metric."""
+- Output ONLY read-only SELECT statements separated by ';'. No prose, no markdown. Small, with LIMIT.
+- One diagnostic per concern; for a difference/comparison gather BOTH sides.
+- Do not write the final answer query - write the checks that let revise fix it."""
 
 EVIDENCE_USER = """Schema:
 {schema}
@@ -137,31 +138,38 @@ Current SQL:
 Execution result:
 {execution}
 
-Verifier issue:
+Verifier concern to resolve:
 {verify_issue}
 
-Evidence questions:
+Acceptance checks to write (one diagnostic each):
 {evidence_questions}
 
-Initial exploration:
+Verified facts from exploration (GROUND TRUTH):
 {findings}
 
-Prior targeted evidence:
+Acceptance checks already run earlier this loop (do not repeat them):
 {evidence}
 
-Return read-only SELECT evidence queries separated by ';'."""
+Return read-only SELECT diagnostic queries separated by ';'."""
 
-REVISE_SYSTEM = """Fix the SQL query based on the verifier feedback and the gathered information. Output ONLY corrected SQL in ```sql block.
-When filtering or matching on a text column, compare case-insensitively with UPPER() on both sides
-(e.g. WHERE UPPER("col") = UPPER('value')) - stored capitalization often differs from the question.
+REVISE_SYSTEM = """You fix ONE read-only SELECT so it can be delivered as the answer. The verifier
+rejected the previous SQL and (usually) ran acceptance checks whose REAL results are given to you. Those
+results are GROUND TRUTH - use them, do not re-guess.
 
-Rules:
-- Use the targeted evidence facts. If evidence contradicts the previous SQL, change the SQL.
-- Return exactly the requested columns and no helper/intermediate columns.
-- Preserve the requested column order.
-- Do not use LIMIT 1 unless the question asks for a single/top/highest/lowest/latest/first result.
-- For differences/comparisons, implement both sides using the DB encodings shown in evidence.
-- For time strings, rates, averages, and percentages, compute the metric explicitly rather than using string shortcuts."""
+Work the verifier's concerns one by one:
+  1. Read the verifier issue and the acceptance-check / evidence results.
+  2. For each problem, take the value or conclusion the evidence SHOWS and change the SQL accordingly.
+     Example: evidence shows gender is stored as 'M' and 'male' returns 0 rows -> filter on 'M', not 'male'.
+  3. Keep every part that was already correct. If the evidence confirms the SQL, return it unchanged.
+
+Then output the corrected query. Requirements:
+- Return exactly the requested columns, in the requested order, nothing extra (no helper/id/intermediate columns).
+- Add LIMIT 1 only if the question asks for a single/top/highest/lowest/latest/first result.
+- Use the stored literals/formats from exploration & evidence, case-insensitive: UPPER("col") = UPPER('value').
+- For differences/comparisons, implement BOTH sides using the DB encodings shown in evidence.
+- Compute metrics (avg/rate/percentage/time parsing) explicitly, not via string shortcuts.
+- Use double-quoted identifiers when names have spaces or reserved words.
+- Output ONLY the SQL inside a ```sql fenced block. No INSERT/UPDATE/DELETE/DROP or other non-read-only SQL."""
 
 REVISE_USER = """Schema:
 {schema}
@@ -172,12 +180,12 @@ Execution result:
 {execution}
 Verifier ok:
 {verify_ok}
-Verifier issue:
+Verifier concern to fix:
 {verify_issue}
-Information gathered from the database (each block is an exploration query and its real result; use the real values/formats shown here):
+Verified facts from exploration (GROUND TRUTH - use these exact values/formats):
 {findings}
 
-Targeted evidence gathered during the loop (preserve these facts; do not forget earlier evidence):
+Acceptance-check results gathered this loop (GROUND TRUTH - copy these conclusions, do not re-guess; do not forget earlier ones):
 {evidence}
 
-Write a corrected SELECT."""
+Write a corrected SELECT that resolves the verifier's concern using the evidence above."""
