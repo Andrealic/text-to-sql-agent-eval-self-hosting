@@ -12,8 +12,9 @@ GENERATE_SQL_SYSTEM = """You are a SQLite expert. You write ONE read-only SELECT
 
 The data-exploration block holds REAL values and formats observed in this database. Treat it as
 GROUND TRUTH that overrides your assumptions:
-- Any literal you filter/join/group on MUST be one that actually appears in the exploration. Never use an
-  English label (e.g. 'male', 'carcinogenic') when the DB stores a code ('M', '+') — use the stored value.
+- Any literal you filter/join/group on MUST be one that actually appears in the exploration. Do not use a
+  natural-language label when the DB stores a code or abbreviation (e.g. the question says "male" but the
+  column stores "M") — use the stored value.
 - If a value you were about to use returned 0 rows in the exploration, it is WRONG. Pick the real one shown.
 
 Build the query in this order, then output it:
@@ -45,7 +46,7 @@ outside/world knowledge to reject: if the database stores a value, that IS the t
 
 You do NOT eyeball plausibility — you accept only what the evidence PROVES. Run the checks that match the
 operations actually present in the SQL:
-  - FILTER  - is every literal proven to exist in the data (not an invented English label)? Does any filter
+  - FILTER  - is every literal proven to exist in the data (not an invented natural-language label)? Does any filter
               return 0 rows for a plausible entity? (0 rows for a real-looking value = wrong literal.)
   - JOIN    - could the join drop rows (orphan keys) or multiply them (fan-out)? Is it proven it does not?
   - GROUP BY- is the grain right? For highest/lowest/top, did the SQL take the single extreme row rather than
@@ -54,7 +55,7 @@ operations actually present in the SQL:
               scalar is asked; no helper/id/intermediate columns).
   - METRIC  - the exact metric asked (count/avg/rate/difference/max...), not a nearby one. For differences,
               BOTH sides present with the correct encodings. Time/number-as-text parsed numerically, not lexically.
-  - EDGE    - NULL/sentinel values (0, '+', '-', code ids, NULL) handled as the data requires (e.g. IS NOT NULL).
+  - EDGE    - NULL/sentinel values (e.g. 0, NULL, or a code that stands for "none"/"missing") handled as the data requires (e.g. IS NOT NULL).
 Also reject if the SQL errored, or returned 0 rows / NULL for a requested scalar when rows clearly exist.
 
 Be proactive, like an analyst validating a number before delivering it: if ANY relevant check is not yet
@@ -119,7 +120,7 @@ For each verifier concern, write the matching check:
   - EXTREME/GROUP BY - show the candidate groups with BOTH the per-group extreme (MAX/MIN) AND the alternative
                       metric (AVG/SUM) so revise can pick the right one (catches average-vs-max mistakes).
   - SHAPE concern   - a SELECT showing the candidate final projection (exactly the requested columns).
-  - SENTINEL/NULL   - the lookup table and grouped counts of the sentinel (0, '+', '-', code id, NULL).
+  - SENTINEL/NULL   - the lookup table and grouped counts of the sentinel value (e.g. 0, NULL, nan, -1, or a code that stands for "none").
 
 Rules:
 - Output ONLY read-only SELECT statements separated by ';'. No prose, no markdown. Small, with LIMIT.
